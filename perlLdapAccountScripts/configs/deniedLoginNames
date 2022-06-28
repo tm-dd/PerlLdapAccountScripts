@@ -1,0 +1,16 @@
+####################################################################################################################################
+# DIE UNTEN STEHENDEN EINTRAEGE SIND ALS MOEGLICHE, NEUE LDAP-LOGINS VERBOTEN (falls in der config nicht anders gewuenscht).       #
+# DIESE LOGINS WERDEN JEDOCH BEWUSST NICHT BEI EINER MIGRATION VON /etc/passwd INS LDAP BEACHTET. DAFUER GIBT ES EIN ANDERE LISTE. #
+####################################################################################################################################
+
+# typische lokale Accounts
+postmaster
+nobody
+hostmaster
+webmaster
+abuse
+security
+root
+nologin
+openldap
+www-data
