@@ -1,0 +1,193 @@
+#!/usr/bin/perl
+#
+# a perl based script to migrate accounts from OpenLDAP to /etc/passwd and /etc/shadow (maybe without usable passwords)
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                           # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                          # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                              # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='MIGRATE USER ACCOUNTS FROM LDAP';                     # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                       # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                  # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                  # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'migrate_ldap_to_local_users','--------------------','y','y'));
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+    
+
+### DATEINAMEN ABFRAGEN ODER AUS PARAMETER HOLEN ###
+
+
+    ## PASSWD FILE
+    if ($namendParameters{"-p"} ne '') {
+        # Datei aus dem Parameter holen
+        $passwdFile=$namendParameters{"-p"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $passwdFile=selectFilename("Please choose the passwd file for exporting.",'/etc/','y');
+    }
+
+    
+    ## SHADOW FILE
+    if ($namendParameters{"-s"} ne '') {
+        # Datei aus dem Parameter holen
+        $shadowFile=$namendParameters{"-s"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $shadowFile=selectFilename("Please choose the shadow file for exporting.",'/etc/','y');
+    }
+
+    
+### ACCOUNTS VOM LDAP ABFRAGEN ### 
+
+    outputInfo ($tmpOutputMessage."Now the script will read the LDAP accounts to create the files. This can take a while. ");
+
+    # teste ob es eine Passwortdatei fuer das LDAP-Admin-Bind gibt und diese lesbar ist
+    my $bindPassword='';
+    open (myOpenTempFile, '<'.$ldapAdminPasswordFile);
+    while (<myOpenTempFile>)
+    {
+        chomp $_;                                                       # entferne evtl. Zeilenumbrueche
+        if ((length($_))>0) { $bindPassword=$_; }                                       # falls nun noch ein Inhalt groesser als 0 Byte in der Datei steht, dann hole den Wert und nutze ihn als Passwort
+    }
+    close (myOpenTempFile);
+    
+    # Frage nach LDAP-Admin-Passwort, wenn es NICHT in der Datei $ldapAdminPasswordFile gefunden wurde
+    if ($bindPassword eq '')
+    {
+        $tmpOutputMessage.='Please type (hidden) the LDAP administrator password to get the password hashes from LDAP for the migration process: ';
+        $bindPassword=inputHiddenText($tmpOutputMessage,'');    
+    }
+    
+    @ldapSearchArray=('uid','uidNumber','gidNumber','cn','homeDirectory','loginShell','userPassword','shadowLastChange','shadowMin','shadowMax','shadowWarning','shadowInactive');
+    $delimiterAfterEachLdapObject="----------"; 
+
+    # starte die Suchanfrage mit Login und Passwort des LDAP-Admins
+    ldapValueSearch($ldapUserBase,\@ldapSearchArray,$delimiterAfterEachLdapObject,'n',\@ldapFoundArray,'',$ldapAdminBind,$bindPassword,'');
+
+
+### passwd erstellen (ein einfaches 'getent passwd' wuerde auch System-Accounts liefern) ###
+
+    # temp. Speicher fuer die spaetere Datei anlegen
+    my $out='';
+    
+    ## durchlaufe alle Ergebnis-Zeilen des LDAPs
+    foreach my $line (@ldapFoundArray)
+    {       
+        # uid: GEFUNDEN -> schreibe das Login des Benutzers in die Spalte
+        # und das 'x' in die naechste Spalte um  bzgl. des Passworted nach shadow zu verweisen
+        if ($line =~ '^uid: ') { @p = split /uid: /,$line; $out.=$p[1].':x:'; }
+        
+        # uidNumber: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^uidNumber: ') { @p = split /uidNumber: /,$line; $out.=$p[1].':'; }
+
+        # gidNumber: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^gidNumber: ') { @p = split /gidNumber: /,$line; $out.=$p[1].':'; }
+
+        # cn: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^cn: ') { @p = split /cn: /,$line; $out.=$p[1].':'; }
+
+        # homeDirectory: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^homeDirectory: ') { @p = split /homeDirectory: /,$line; $out.=$p[1].':'; }
+
+        # loginShell: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^loginShell: ') { @p = split /loginShell: /,$line; $out.=$p[1]; }
+        
+        # ENDE des ACCOUNT durch $delimiterAfterEachLdapObject GEFUNDEN -> schreibe Zeilenende-Zeichen
+        if (($line eq $delimiterAfterEachLdapObject)&&($out ne '')) { $out.="\n"; }
+    }
+    
+    # passwd-Datei erstellen
+    open (passwdFileHandle,'>'.$passwdFile) or outputAndDie("ERROR: Could not write file: $passwdFile \n");     # Datei oeffnen
+    print passwdFileHandle $out;                                            # Inhalt (inkl. aller Zeilenumbrueche) schreiben
+    close passwdFileHandle;                                             # Datei schliessen
+
+
+### shadow erstellen (ein einfaches 'getent shadow' wuerde auch System-Accounts liefern) ###
+
+    # temp. Speicher fuer die spaetere Datei (leeren)
+    $out='';
+    $foundPWH=0;
+    $userNR=0;
+    
+    ## durchlaufe alle Ergebnis-Zeilen des LDAPs
+    foreach my $line (@ldapFoundArray)
+    {       
+        # uid: GEFUNDEN -> schreibe das Login des Benutzers in die Spalte
+        if ($line =~ '^uid: ') { @p = split /uid: /,$line; $uid=$p[1]; $userNR++; }
+        
+        # userPassword: GEFUNDEN -> schreibe den Wert (ohne den OFFSET fuer CRYPT) in die Spalte
+        if ($line =~ '^userPassword: ') {
+            @p = split /userPassword: /,$line; $pwh=$p[1];                          # Passwort holen
+            if ($pwh eq '') { $pwh='Nologin******'; }                           # falls leer 'NoLogin******' setzen
+            $pwh=~s/{CRYPT}//;                                      # CRYPT-Kennung entfernen
+            $foundPWH=1;                                            # der Passwort-Hash wurde gefunden
+        }
+
+        # shadowLastChange: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^shadowLastChange: ') { @p = split /shadowLastChange: /,$line; $shlc=$p[1]; }
+
+        # shadowMin: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^shadowMin: ') { @p = split /shadowMin: /,$line; $shmi=$p[1]; }
+
+        # shadowMax: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^shadowMax: ') { @p = split /shadowMax: /,$line; $shma=$p[1]; }
+
+        # shadowWarning: GEFUNDEN -> schreibe den Wert in die Spalte
+        if ($line =~ '^shadowWarning: ') { @p = split /shadowWarning: /,$line; $shw=$p[1]; }
+        
+        # shadowInactive: GEFUNDEN -> schreibe den Wert in die Spalte UND das LEERE Feld fuer Deaktivierung
+        if ($line =~ '^shadowInactive: ') { @p = split /shadowInactive: /,$line; $shi=$p[1]; }
+
+        # INFO: Die Letzte Reserve-Spalte wird wie ueblich auch leer gelassen.
+        
+        # ENDE des ACCOUNT durch $delimiterAfterEachLdapObject GEFUNDEN (da die erste Zeile auch der 
+        if (($line eq $delimiterAfterEachLdapObject)&&($userNR>0))
+        {
+            if ($foundPWH==0) { $pwh='Nologin******'; }                         # pruefe ob ein Unix-Passwort-Hash gefunden wurde und schreibe ein 'Nologin******' LDAP nicht zurueck gab, weil z.B. das Feld leer war
+            $out.=$uid.':'.$pwh.':'.$shlc.':'.$shmi.':'.$shma.':'.$shw.':'.$shi.'::'."\n";          # setze die Zeile zusammen
+            $foundPWH=0;                                            # setze den "Merker" zurueck
+        }
+    }
+    
+    # passwd-Datei erstellen
+    open (shadowFileHandle,'>'.$shadowFile) or outputAndDie("ERROR: Could not write file: $shadowFile \n");     # Datei oeffnen
+    print shadowFileHandle $out;                                            # Inhalt (inkl. aller Zeilenumbrueche) schreiben
+    close shadowFileHandle;                                             # Datei schliessen
+
+
+### NSCD neu einlesen lassen und beenden
+if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+
+exit 0

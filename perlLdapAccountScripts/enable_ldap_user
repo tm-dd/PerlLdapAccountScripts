@@ -1,0 +1,328 @@
+#!/usr/bin/perl
+#
+# perl based script to enable an disabled ldap user account
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                                       # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                                  # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                                          # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='ENABLE USER ACCOUNT';                                                             # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                                               # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                      # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                          # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'enable_ldap_user','--------------------','y','y'));               # holt alle Zeilen aus der Doku-Datei und gibt diese aus
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+
+### Benutzername aus dem Parameter holen und pruefen ODER anzeigen der Liste vorhandener Accounts und zur Auswahl anbieten ###
+
+    my $choise=chooseOrTestLdapItem($ldapUserBase,$namendParameters{"-u"},'uid');                               # gibt die vollstaendige, lange 'DN' des LDAP-Eintrags zurueck
+
+
+### aus dem LDAP Login und Heimatverzeichnis des Benutzers holen ###
+
+    # die alten Werte des Account aus dem LDAP holen
+    @ldapSearchArray=('shadowLastChange','sambaPwdLastSet','sambaPwdCanChange','sambaPwdMustChange','homeDirectory','userPassword','givenName','sn','cn','uid','mail','oldLoginShell','oldHomeDirectory','oldUserPassword','oldSambaLMPassword','oldSambaNTPassword');
+    @ldapFoundArray=();
+
+    # teste ob es eine Passwortdatei fuer das LDAP-Admin-Bind gibt und diese lesbar ist
+    my $bindPassword='';
+    open (myOpenTempFile, '<'.$ldapAdminPasswordFile);
+    while (<myOpenTempFile>)
+    {
+        chomp $_;                                                                       # entferne evtl. Zeilenumbrueche
+        if ((length($_))>0) { $bindPassword=$_; }                                       # falls nun noch ein Inhalt groesser als 0 Byte in der Datei steht, dann hole den Wert und nutze ihn als Passwort
+    }
+    close (myOpenTempFile);
+    
+    # Frage nach LDAP-Admin-Passwort, wenn es NICHT in der Datei $ldapAdminPasswordFile gefunden wurde
+    if ($bindPassword eq '')
+    {
+        $tmpOutputMessage.='Please type the LDAP administrator password to fetch the OLD settings of the USER: ';
+        $bindPassword=inputHiddenText($tmpOutputMessage,'');    
+    }
+    
+    # starte die Suchanfrage als LDAP-Admin
+    ldapValueSearch($choise,\@ldapSearchArray,'','y',\@ldapFoundArray,'',$ldapAdminBind,$bindPassword,'');
+    
+    my $setShadowLastChange=$ldapFoundArray[0];                                         # hole den Tag der letzten Passwort-Aenderung (nach dem 1.1.1970)
+    my $setSambaPwdLastSet=$ldapFoundArray[1];                                          # hole die Sekunden der letzten Passwort-Aenderung (nach dem 1.1.1970)
+    my $setSambaPwdCanChange=$ldapFoundArray[2];
+    my $setSambaPwdMustChange=$ldapFoundArray[3];
+    my $curHomeDirectory=$ldapFoundArray[4];                                            # das aktuelle Home (sollte idealerweise gesperrt sein)
+    my $curUserPassword=$ldapFoundArray[5];                                             # der aktuelle Passworthash
+    my $firstname=$ldapFoundArray[6];
+    my $surname=$ldapFoundArray[7];
+    my $fullname=$ldapFoundArray[8];
+    my $login=$ldapFoundArray[9];
+    my $email=$ldapFoundArray[10];
+    my $oldLoginShell=$ldapFoundArray[11];
+    my $oldHomeDirectory=$ldapFoundArray[12];
+    my $oldUnixPassword=$ldapFoundArray[13];
+    my $oldSambaLMPassword=$ldapFoundArray[14];
+    my $oldSambaNTPassword=$ldapFoundArray[15];
+
+
+### DEBUG aktivieren ###
+
+        if ($namendParameters{"--debug"} eq 'SET')
+    {
+        if ( (scalar @ldapFoundArray) < 5 ) { $tmpOutputMessage.="*** DEBUG: WARNING, some values are missing. This way give a wrong assignment of the values. ***\n\n"; }
+        
+        $tmpOutputMessage.="*** DEBUG: Found the following Values in LDAP: ***\n\n";
+        for ($i; $i<11; $i++)
+        {
+            $tmpOutputMessage.="   $ldapSearchArray[$i] : $ldapFoundArray[$i]\n";
+        }
+        outputInfo("\n".$tmpOutputMessage."\n");
+    }
+
+
+### Testen ob auch alle Werte gekommen sind ###
+
+    if ( (scalar @ldapFoundArray) < 5 )
+    {
+        outputAndDie("Could not get all LDAP values of the account.\n*** MAYBE the LDAP administrator PASSWORD was NOT CORRECT or the account miss some vaules ? ***\nHint: Try it again and use '--debug'.");
+    }
+    
+
+### pruefen ob der Account ueberhaubt gesperrt wurde und den String des alten Heimatverzeichnisses wieder herstellen ###
+
+    if ($curUserPassword ne $unixDisabledPasswordHash)
+    {
+        outputAndDie("It looks like, the Account was not disabled before.\n");
+    }
+
+
+### bestimme den Umgang mit einen evtl. alten Kennwort ###
+
+    # falls fuer den Account kein sinnvolles altes Kennwort existiert, muss ein neues Passwort eingegeben werden
+    if (($oldUnixPassword eq '') || ($oldUnixPassword eq $unixDisabledPasswordHash))
+    {
+        $namendParameters{"-t"}='n';
+    }
+
+    # frage ob das alte Passwort oder ein neues Passwort genutzt werden soll
+    if (!(($namendParameters{"-t"} eq 'o') || ($namendParameters{"-t"} eq 'n')))
+    {
+        my $tempAnswert = yesNoQuestion("SHOULD I USE THE OLD PASSWORD instead to type a new one ?",'y','n','y');
+        if ($tempAnswert eq 'y') { $namendParameters{"-t"}='o'; }
+        else { $namendParameters{"-t"}='n'; }
+    }
+
+
+### PASSWORT (ABFRAGEN) UND HASHES ERSTELLEN, FALLS GEWUENSCHT ###
+
+    if ($namendParameters{"-t"} eq 'n')
+    {
+        # neues Passwort erstellen
+        
+        $passwordText1='Please type a new password for the user: ';
+        $passwordText2='Please type the same password, again: ';
+            
+        if ($namendParameters{"-p"} ne '')
+        {
+            # Passwort aus Parameter holen
+            ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,$namendParameters{"-p"});
+        }
+        else {
+            # Passwort interaktiv eingeben lassen
+            ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,'');
+        }
+        
+        # ersetze das Datum der Passwort-Aenderung spaeter im LDAP
+        $setShadowLastChange=$shadowLastChange;
+        $setSambaPwdLastSet=$thisTime;
+        $setSambaPwdCanChange=$sambaPwdCanChange;
+        $setSambaPwdMustChange=$sambaPwdMustChange;
+    }
+    else
+    {
+        # die alten Passwort-Hashes aus dem LDAP verwenden
+        $userPassword=$oldUnixPassword;
+        $sambaLMPassword=$oldSambaLMPassword;
+        $sambaNTPassword=$oldSambaNTPassword;
+    }
+    
+    # ueberschreiben des unsicheren LM-Passwortes (ist fuer SMB-Zugriffe bis Windows ME noetig), wenn dies gewuenscht ist
+    if ($disableSambaLMPassword eq 'y') {
+        $sambaLMPassword='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+    }
+
+ 
+### das alte Unix-Kennwort testen ###
+
+	# falls das array @goodHashArtsByEnableOldPasswords ueberhaupt gesetzt ist, 
+	if ((scalar @goodHashArtsByEnableOldPasswords) > 0)
+	{
+		my $hashIsValid=0;
+		foreach $validHashArt (@goodHashArtsByEnableOldPasswords)
+		{
+			if ($namendParameters{"--debug"} eq 'SET') { print outputInfo("DEBUG: Try if the password hash '$userPassword' starts with the string '$validHashArt'.\n"); }
+			if ($userPassword =~ /^$validHashArt/) { $hashIsValid=1; }									# falls das Nutzerpasswort mit der richtigen HashArt (z.B. '{ssha512}' beginnt)
+		}
+		if ( $hashIsValid==0 )																			# falls die HashArt nicht als gueltig erkannt wurde -> Warnung ausgeben
+		{
+			outputInfo("\n!!! WARNING: The user has an INVALID (OR OLD) PASSWORD ART and should be change the password as soon as possible. !!!\n");
+			sleep(8);																					# warte ein paar Sekunden, dass die Warnung auch auffallen kann
+		}
+	}
+
+
+### LDIF-Datei zum entsperren erstellen ###
+
+    my @toChange;
+    $toChange[0][0]='userPassword'; $toChange[0][1]=$userPassword;                                  	# schreibt das Unix-Passwort
+    $toChange[1][0]='sambaLMPassword'; $toChange[1][1]=$sambaLMPassword;                                # schreibt das Samba-LM-Passwort
+    $toChange[2][0]='sambaNTPassword'; $toChange[2][1]=$sambaNTPassword;                                # schreibt das Samba-NT-Passwort
+    $toChange[3][0]='shadowLastChange'; $toChange[3][1]=$setShadowLastChange;                           # schreibe das alte oder neue Datum der Passwort-Aenderung im LDAP
+    $toChange[4][0]='sambaPwdLastSet'; $toChange[4][1]=$setSambaPwdCanChange;                           # schreibe die alte oder neue Zeit der moeglichen Samba-Passwort-Aenderung ins LDAP
+    $toChange[5][0]='sambaPwdCanChange'; $toChange[5][1]=$setSambaPwdMustChange;                        # schreibe die alte oder neue Zeit der zwingenden Samba-Passwort-Aenderung ins LDAP
+    $toChange[6][0]='sambaPwdMustChange'; $toChange[6][1]=$setSambaPwdLastSet;                          # schreibe die alte oder neue Zeit der Passwort-Aenderung ins LDAP
+    $toChange[7][0]='accountValidUntil'; $toChange[7][1]=((int($thisTime/24/3600))+$defaultValidDays);  # dies soll (wie in shadowMax ueblich) die max. Gueltigkeit des Accounts definieren
+    $toChange[8][0]='oldLoginShell'; $toChange[8][1]=$lockedLoginShell;                             	# die alte Shell loeschen
+    $toChange[9][0]='oldHomeDirectory'; $toChange[9][1]=$lockedHomeDir;                             	# das alte Home loeschen
+    $toChange[10][0]='oldUserPassword'; $toChange[10][1]=$unixDisabledPasswordHash;                     # das alte Unix-Passwort loeschen
+    $toChange[11][0]='oldSambaLMPassword'; $toChange[11][1]='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';         # das alte LM-Passwort loeschen
+    $toChange[12][0]='oldSambaNTPassword'; $toChange[12][1]='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';         # das alte LM-Passwort loeschen
+
+    # ersetze die alte Shell nur wenn diese sinnvoll ist
+    if (($oldLoginShell ne '') && ($oldLoginShell ne $lockedLoginShell))
+    {
+        $toChange[13][0]='loginShell'; $toChange[13][1]=$oldLoginShell;                             
+    }
+    
+    # ersetze das alte Heimatverzeichnis nur wenn dieses sinnvoll ist
+    if (($oldHomeDirectory ne '') && ($oldHomeDirectory ne $lockedHomeDir))
+    {
+        $toChange[14][0]='homeDirectory'; $toChange[14][1]=$oldHomeDirectory;
+    }   
+
+    createLdifFileForChanges($ldifTempFilename,$choise,'new',\@toChange);                               # erstellt die LDIF-Datei mit den Aenderungen anhand der Array-Werte
+
+
+### reaktivieren des LDAP-Benutzeraccounts mit Angabe des LDAP-Admin-Passwortes ###
+
+    $tmpOutputMessage.="Please type the LDAP administartor password to reactivate the user '".$choise."' OR stop that with a wrong password.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapadd -x -D $ldapAdminBind -h $ldapServer -W -f $ldifTempFilename",'');
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n"); 
+
+### fuege den Benutzer zur (den) Gruppe(n) der aktiven Benutzeraccounts hinzu
+
+    # falls nicht anderes gewuenscht
+    if (($namendParameters{"--unchangeGroups"} ne 'SET')&&($groupListsOfActiveUsers ne ''))
+    {
+        outputInfo("Put the user '".$namendParameters{"-u"}."' into the ldap group(s) '$groupListsOfActiveUsers' ...");
+        system ($pathOfScripts.'add_ldap_users_to_groups -g '.$groupListsOfActiveUsers.' -u '.$namendParameters{"-u"}.' -i '.$namendParameters{"-i"});                      
+    }
+
+
+### hole das verschobene Heimatverzeichnis wieder zurueck, falls der Account korrekt disabled wurde ###
+
+    # falls das Heimatverzeichnis ueberhaupt verschoben war
+    if ( -e "$moveLockedHomeDirTo"."$oldHomeDirectory" )
+    {
+        # teste ob das Ziel-Heimat-Verzeichnis schon existiert
+        if ( -e "$oldHomeDirectory" )
+        {
+            # Warnung ausgeben, dass das Verzeichnis nicht verschoben werden konnte
+            outputInfo('*** ERROR: SKIP moving home directory to '.$oldHomeDirectory.". A file or directory with the same name still exists. ***\n");
+        }
+        else
+        {
+            if ( -e "$moveLockedHomeDirTo"."$oldHomeDirectory" )
+            {
+                # verschiebe das Heimatverzeichnis zurueck
+                outputInfo("Moving home directory from '".$moveLockedHomeDirTo.$oldHomeDirectory."' to '".$oldHomeDirectory."' now.");
+                system ("set -x; mv $moveLockedHomeDirTo"."$oldHomeDirectory $oldHomeDirectory");
+            }
+        }
+    }
+
+
+### hole das verschobene Heimatverzeichnis wieder zurueck, falls der Account NICHT disabled wurde und das Heimatverzeichnis trotzdem manuell verschoben wurde ###
+
+    # ermittle das aktuelle Heimnatverzeichnis, laut LDAP
+    my @ldapFoundArray; 
+    my @ldapSearchArray=('homeDirectory');
+    ldapValueSearch($choise,\@ldapSearchArray,'','y',\@ldapFoundArray,'','','','');
+    $curHomeDirectory=$ldapFoundArray[0];
+
+    # falls das Heimatverzeichnis immer noch nicht existiert
+    if (( ! -e "$curHomeDirectory" ) && ( "$curHomeDirectory" ne "" ))
+    {
+        # teste Heimatverzeichnis in das Verzeichnis der gesperrten Heimatverzeichnisse verschoben wurde
+        if ( -e "$moveLockedHomeDirTo"."$curHomeDirectory" )
+        {
+            # verschiebe das Heimatverzeichnis zurueck
+            outputInfo("Moving home directory from '".$moveLockedHomeDirTo.$curHomeDirectory."' to '".$curHomeDirectory."', now.\nPLEASE CHECK THIS MANUALLY.");
+            system ("set -x; mv $moveLockedHomeDirTo"."$curHomeDirectory $curHomeDirectory");
+        }
+        else
+        {
+            outputInfo("Warning: The home directory was not found.\n");
+        }
+    }
+
+
+### sende eine E-Mail, dass ein Nutzeraccount wieder reaktiviert wurde ###
+
+    open(MAIL,'| /usr/sbin/sendmail -t');
+    print MAIL "To: ";
+    for my $target (@NotifyEnabledUserEmailTo)
+    {
+        print MAIL "$target, ";
+    }
+    print MAIL "\n";
+    print MAIL "From: $sendEmailNotificationsfrom\n";
+    print MAIL "Subject: Old account >> $login << REACTIVATED for >> $fullname <<\n";
+    print MAIL "The following old account was reactivated:\n\n";
+    print MAIL "   first name: $firstname\n";
+    print MAIL "   surname:    $surname\n";
+    print MAIL "   full name:  $fullname\n";
+    print MAIL "   login:      $login\n";
+    print MAIL "   email:      $email\n";
+    print MAIL "   ldap base:  $ldapBase\n\n";
+    print MAIL "Time of reactivation: ".localtime()."\n\n";
+    close(MAIL);
+
+
+### NSCD-Cache der Gruppen neu einlesen lassen. NOETIG, da sonst die Accounts erst nach einiger Zeit bzw. Neustart korrekt nutzbar sind. ###
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo("reloading the local nscd (name service cache daemon) for the user accounts ...\n"); }
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i passwd"; }
+
+exit 0;

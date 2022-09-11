@@ -1,0 +1,157 @@
+#!/usr/bin/perl
+#
+# perl based script to remove ldap user(s) from ldap group(s)
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                                      # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                     # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                         # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='REMOVE USER(S) FROM GROUP(S)';                                                                   # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                                                          # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                                                     # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                                                         # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'delete_ldap_users_from_groups','--------------------','y','y'));                                   # holt alle Zeilen aus der Doku-Datei und gibt diese aus
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+
+### Gruppennamen aus dem Parameter holen und pruefen ODER anzeigen der Liste vorhandener Gruppen und zur Auswahl anbieten ###
+
+    my @groupNames;                                                                 # Array mit Gruppen-Namen
+    my $numberGroups;                                                               # Anzahl von Gruppen im Array
+    my @fullGroupDNs;                                                               # Array mit den vollstaendigen DNs der Gruppen
+
+    # manuelle Eingabe einer moeglichen Gruppe falls keine angegeben wurde
+    if ($namendParameters{"-g"} eq '')
+    {
+        $namendParameters{"-g"}=inputText("Please type a (comma separated list of) group(s) for the account(s) : ");
+    }
+
+    # Gruppen in Array aufsplitten
+    @groupNames = split (/[,]+/,$namendParameters{"-g"});                                               # Trennzeichen fuer Gruppennamen (Felder) in Zeile
+    $numberGroups=scalar(@groupNames);                                                      # Anzahl von Gruppen
+
+    # pruefe ob die Gruppen existieren und hole die vollstaendigen, langen 'DN's der LDAP-Gruppen
+    for ($i=0; $i<$numberGroups; $i++)
+    {       
+        push(@fullGroupDNs,(chooseOrTestLdapItem($ldapGroupBase,$groupNames[$i],'cn')));                            # speichere die DN im Array '@fullGroupDNs' ab
+    }
+
+### Loginnamen eingeben oder aus Parameter holen und splitten und in Array schreiben
+
+    my @userLogins;                                                                 # Array mit Benutzer Logins
+    my $numberOfUserLogins;                                                             # Anzahl von Benutzer Logins
+
+    # manuelle Eingabe falls noetig 
+    if ($namendParameters{"-u"} eq '')
+    {
+        $namendParameters{"-u"}=inputText("Please type the (comma separated list of) login(s) to remove from the unix group(s) '".$namendParameters{"-u"}."' : ");
+    }
+
+    # Logins in Array aufsplitten
+    @userLogins = split (/[,]+/,$namendParameters{"-u"});                                               # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+    $numberUsers=scalar(@userLogins);                                                       # Anzahl von Benutzern fuer die Gruppe
+
+
+    # Debug-Ausgabe der Benutzer fuer das Array
+    if ($namendParameters{"--debug"} eq 'SET') {
+        $tmpOutputMessage="DEBUG: This Users will be removed from the group '".$ldapGroupCN."' (if exists):";
+        foreach my $i (@userLogins) {
+            $tmpOutputMessage.=" '".$i."'";
+        }
+        outputInfo($tmpOutputMessage."\n");
+    }
+
+    
+### Logins des Arrays pruefen und im Fehlerfall abbrechen
+
+    my @ldapFoundArray; 
+    my $couldNotFoundAllUsers=0;
+
+    # fuer alle Gruppen
+    foreach my $groupName (@groupNames)
+    {
+        my $ldapSearchBase='cn='.$groupName.','.$ldapGroupBase;
+        my @ldapSearchArray=('memberUid');
+        ldapValueSearch($ldapSearchBase,\@ldapSearchArray,'','y',\@ldapFoundArray,'','','','');                # starte eine anonyme Suchanfrage und hole alle Teilnehmer einer Gruppe
+
+        # fuer alle uebergeben Accounts
+        foreach my $searchLoginName (@userLogins)
+        {
+            my $foundUser=0;
+
+            # suche ob der/die Account(s) in dieser Gruppen ist/sind
+            foreach my $loginName (@ldapFoundArray)
+            {
+                if ($loginName eq $searchLoginName)
+                {
+                    $foundUser=1;
+                }
+            }
+
+            # spaeter Meldung geben, dass mindestens ein Nutzer nicht gefunden wurde
+            if ($foundUser != 1)
+            {
+                $tmpOutputMessage.="ERROR: Could not found the user '$searchLoginName' in the group '$groupName'.\n";
+                $couldNotFoundAllUsers=1;
+            }
+        }
+    }
+
+    # Abbruch wenn ein Nutzer nicht in der Gruppe gefunden wurde
+    if ($couldNotFoundAllUsers == 1)
+    {
+        outputInfo($tmpOutputMessage."\n");
+        exit 0;
+    }
+
+
+### LDIF-Datei zum Loeschen der Benutzer in die Gruppe erstellen und senden
+
+    createLdifFileToAddOrRemoveUsersfromGroups($ldifTempFilename,$numberUsers,$numberGroups,\@userLogins,\@fullGroupDNs,'delete');
+    
+    # LDAP-Daten hinzufuegen (um die Accounts anzulegen) mit einem LDAP-Admin-Passwort
+    $tmpOutputMessage.="Please type the LDAP administartor password to delete the account(s) '".$namendParameters{"-u"}."' from the group(s) '".$namendParameters{"-g"}."' OR stop that with a wrong password.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapadd -x -D $ldapAdminBind -h $ldapServer -W -f $ldifTempFilename",'');
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n");
+
+
+### NSCD-Cache der Benutzer und Gruppen neu einlesen lassen. ###
+
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo("reloading the local nscd (name service cache daemon) for the groups and accounts ...\n"); }
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+
+
+exit 0;

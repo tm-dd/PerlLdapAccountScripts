@@ -1,0 +1,138 @@
+#!/usr/bin/perl
+#
+# perl based script to remove ldap user accounts
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                                           # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                          # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                              # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='DELETE USER ACCOUNT';                                                                                     # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                                                               # als Zwischenspeicher fuer Ausgaben
+    my $uid='';                                                                                                 # Login des Benutzers
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                                                          # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                                                              # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'delete_ldap_user','--------------------','y','y'));                                                   # holt alle Zeilen aus der Doku-Datei und gibt diese aus
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+
+### Benutzernamen aus dem Parameter holen und pruefen ODER anzeigen der Liste vorhandener Benutzer und zur Auswahl anbieten ###
+
+        my $choise=chooseOrTestLdapItem($ldapUserBase,$namendParameters{"-u"},'uid');
+        
+
+### loesche den Benutzer aus (den) Gruppe(n) der aktiven Benutzeraccounts 
+
+    # falls nicht anderes gewuenscht
+    if (($namendParameters{"--unchangeGroups"} ne 'SET')&&($groupListsOfActiveUsers ne ''))
+    {
+        outputInfo("Delete the user '".$namendParameters{"-u"}."' from the ldap group(s) '$groupListsOfActiveUsers' ...");
+        system ($pathOfScripts.'delete_ldap_users_from_groups -g '.$groupListsOfActiveUsers.' -u '.$namendParameters{"-u"}.' -i '.$namendParameters{"-i"});                     
+    }
+
+
+### Namen des Benutzer aus Parameter laden oder im LDAP alle Benutzer einlesen lassen ###
+
+        # ermitteln von wichtigen LDAP-Daten zum gewaehlten Eintrag
+        @ldapSearchArray=('uid','homeDirectory'); @ldapFoundArray=();                                                                               # uid und homeDirectory aus LDAP holen
+        ldapValueSearch($choise,\@ldapSearchArray,'','y',\@ldapFoundArray,'','','','');
+        $uid=@ldapFoundArray[0];
+        $home=@ldapFoundArray[1];
+
+        # ermittle ob der Benutzer gerade eingeloggt ist
+        @loginUsersLines = split /\n/,`w -h`;                                                                                                               # hole der Liste aller angemeldeter Benutzer mittels des Kommandos "w -h" 
+        foreach $i (@loginUsersLines) {                                                                                             # durchlaufe alle Zeilen
+                @loginUserfields = split / /,$i;                                                                                        # eingeloggter Benutzer in '@loginUserfields[0]' gefunden
+                if (@loginUserfields[0] eq $uid)                                                                                        # Nutzer $uid ist gerade eingeloggt
+                {
+                        outputAndDie("ERROR: Stoped here, because he user '".$uid."' is still loged in on the local machine.\n");
+                }
+        }
+        
+        # loeschen des LDAP-Eintrages mit Angabe des LDAP-Admin-Passwortes
+        $tmpOutputMessage.="Please type the LDAP administartor password to delete the user '".$uid."' OR stop that with a wrong password.\n";
+        runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapdelete -v -x -h $ldapServer -D $ldapAdminBind -W $choise",'');
+
+
+### Loeschen der Benutzer-Dateien
+
+        my $tmpYesNoQuestion='-';
+
+        # Parameter auswerten
+    if (!(($namendParameters{"-h"} eq 'k')||($namendParameters{"-h"} eq 'd')))                                                                          # falls die Frage nicht durch die Parameter unnoetig wird
+    {
+            $tmpYesNoQuestion=yesNoQuestion("Should I DELETE the home directory '".$home."' of the user '".$uid."', now ?",'y','n','n');                    # Abfrage ob Benutzerdaten geloescht oder erhalten bleiben sollen
+        }
+
+        if (($namendParameters{"-h"} eq 'd')||($tmpYesNoQuestion eq 'y'))
+        {
+            if ($home !~ /^\/dev\//)
+            {
+                system 'rm -rf '.$home;                                                                                                                     # loesche Benutzerdaten
+                outputInfo("INFO: The home directory '$home' was DELETED, now.\n");
+
+            }
+            else
+            {
+                outputInfo("ERROR: Untypical home directory '".$home."' of the user '".$uid."'. I don't delete this.\n");
+            }
+        }
+        else
+        {
+            outputInfo("The home directory '".$home."' of the user '".$uid."' was NOT deleted, now.\n");
+        }
+
+
+### sende eine E-Mail, dass ein Nutzeraccount geloescht wurde ###
+
+    open(MAIL,'| /usr/sbin/sendmail -t');
+    print MAIL "To: ";
+    for my $target (@NotifyDeletedUserEmailTo)
+    {
+        print MAIL "$target, ";
+    }
+    print MAIL "\n";
+    print MAIL "From: $sendEmailNotificationsfrom\n";
+    print MAIL "Subject: Account >> $uid << deleted from: $ldapUserBase\n";
+    print MAIL "The account '$uid' ($ldapBase) was deleted, now.\n\n";
+    print MAIL "Time of deleting: ".localtime()."\n\n";
+    close(MAIL);
+
+
+### NSCD-Cache der Benutzer-Accounts neu einlesen lassen. NOETIG, da sonst der Account evtl. noch eine ganze Weile falsch aufgeloesst wird.
+
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo("reloading the local nscd (name service cache daemon) for the accounts ...\n"); }
+        if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i passwd"; }
+
+
+exit 0;

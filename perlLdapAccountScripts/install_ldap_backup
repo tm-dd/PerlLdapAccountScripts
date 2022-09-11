@@ -1,0 +1,134 @@
+#!/usr/bin/perl
+#
+# perl based script to import a backup file to the ldap server
+# useful to import backups, created from the command make_ldap_backup
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                       # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                      # die zentrale Funktions-Datei einbinden
+
+
+### variables and defaults ###
+
+    our $windowTitle='MAKE LDAP BACKUP';                            # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                   # als Zwischenspeicher fuer Ausgaben
+    my $ldapConditions = '(objectclass=*)';                         # Abfrage-Bedingungen fuer die LDAP-Anfrage - '(objectclass=*)' holt alles
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }              # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }              # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'install_ldap_backup','--------------------','y','y'));
+        exit;
+    }
+
+
+### WERTE ZUM ACCOUNT ABFRAGEN UND ERSTELLEN ###
+
+    # Datei mit den LDAP-Backups
+    if ($namendParameters{"-b"} ne '') {
+        # Datei mit dem LDAP-Backup aus Parameter laden
+        $importBackupFile=$namendParameters{"-b"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei mit dem LDAP-Backup
+        $importBackupFile=selectFilename("Please choose the LDAP backup file, now.","Please choose the LDAP backup file, now.",'/root/','y');
+    }
+
+
+## erstelle aktuelles LDIF-Backup der LDAP-Daten
+
+    outputInfo("CREATE A NEW LDAP BACKUP before restoring your file '".$importBackupFile."'.\n");
+    system $pathOfScripts.'make_ldap_backup -b '.$ldapBackupFile;
+
+
+## teste welche Objekte nicht in beiden LDIF-Dateien vorhanden sind
+
+    $tmpOutputMessage="Check which LDAP opjects will be changed by installing the backup.\n";
+
+    open (openfile, "< ".$backupDirectory.$ldapBackupFile) or outputAndDie("Could not open: '".$backupDirectory.$ldapBackupFile."'.");
+
+    # durchlaufe das alte LDIF-File
+    while (<openfile>) {
+        chomp ($newLine=$_);                        # Zeilenendezeichen entfernen aus Variablen
+        if (((length($newLine))>0)&&($newLine=~/^dn:/)) {       # suche neue Objekte
+            push @oldDns,$newLine;                  # alten DN-Wert hinzufuegen
+        }
+    }
+
+    close openfile;
+
+    open (openfile2, '<'.$importBackupFile) or outputAndDie("Could not open: '$importBackupFile'.");
+
+    # durchlaufe das neue LDIF-File
+    while (<openfile2>) {
+        chomp ($newLine=$_);                        # Zeilenendezeichen entfernen aus Variablen
+        if (((length($newLine))>0)&&($newLine=~/^dn:/)) {       # suche neue Objekte
+            push @newDns,$newLine;                  # neuen DN-Wert hinzufuegen
+        }
+    }
+
+    close openfile2;
+
+    # vergleiche beide LDIP-Objekt-Arrays (dabei wird getestet ob beide LDIF-Dateien die gleichen DNs haben)
+
+    $noDifferents=1;
+
+    foreach $i (@newDns) {
+        $foundDn=0;
+        foreach $j (@oldDns) {
+            if ($i eq $j)   {
+                $foundDn=1;
+            }
+        }
+        if ($foundDn==0) { $tmpOutputMessage.="!!! Only in '$importBackupFile' => ".$i."\n"; $noDifferents=0; }
+    }
+
+    foreach $i (@oldDns) {
+        $foundDn=0;
+        foreach $j (@newDns) {
+            if ($i eq $j)   {
+                $foundDn=1;
+            }
+        }
+        if ($foundDn==0) { $tmpOutputMessage.="!!! Only in '$ldapBackupFile' => ".$i."\n"; $noDifferents=0; }
+    }
+
+    if ($noDifferents==1) { $tmpOutputMessage.="The name of the objects from the new and the current backup are the same. But the settings of the objects can be differ.\n"; }
+
+    outputInfo($tmpOutputMessage);
+
+
+## loesche alte LDAP-Daten
+
+    $tmpOutputMessage="\nWill now delete the current LDAP tree from the DN: $ldapBase\n";
+    $tmpOutputMessage.="Please type the LDAP administartor password to delete this.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapdelete -v -r -x -W -D '$ldapAdminBind' -h $ldapServer $ldapBase",'');
+
+
+## erzeugen neue LDAP-Daten anhand des LDIF-Backups
+
+    $tmpOutputMessage="\nWill now import the new LDAP backup file: $importBackupFile\n";
+    $tmpOutputMessage.="Please type the LDAP administartor password to delete this.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapadd -v -x -W -D '$ldapAdminBind' -h $ldapServer -f $importBackupFile",'');
+
+
+## ENDE
+    outputInfo("The import process is finish, now.");
+
+exit 0;

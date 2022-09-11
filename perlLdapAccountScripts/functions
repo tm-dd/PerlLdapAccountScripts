@@ -1,0 +1,2046 @@
+#!/usr/bin/perl
+#
+# functions of the perlLdapAccountScripts
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+################
+# MODULE LADEN #
+################
+
+## fuer die versteckte (Passwort-)Eingabe
+use Term::ReadKey;                  # benoetigt: "apt-get install libterm-readkey-perl"
+
+## zum Erstellen von Passwoert-Haches
+use Crypt::SmbHash;                             # fuer die Samba-Passwoerter (benoetigt: apt-get install libcrypt-smbhash-perl)
+use Digest::MD5;                                # fuer das MD5-Passwort
+use Digest::SHA;                                # fuer das SSHA-512-Passwort
+use MIME::Base64;                               # fuer Base64-Kodierung, genutzt fuer die Passwort-Hashes
+
+
+######################
+# WICHTIGE PARAMETER #
+######################
+
+## PARAMETER von Skripten beim Aufruf auslesen
+my $parameter1=shift();
+my $parameter2=shift();
+our %namendParameters;
+our @unnamendParameters;
+
+$namendParameters{'-layouttype'}=$usedGui;      # Hash-Wert fuellen: noetig, um spaeteren Fehler beim Gebrauch des Inhalt zu vermeiden
+
+while ($parameter1 ne '')
+{
+    # benannte Parameter (Parameter die mit einen '-' oder '--' im Namen anfangen wie z.B. "script -u VALUE" oder "script --username VALUE")
+    if ($parameter1 =~ /^-/) {
+
+        # Fall: Parameter1 hat keinen Wert angegeben
+        if (($parameter2 eq '')||($parameter2 =~ /^-/)) {
+            $namendParameters{"$parameter1"}='SET';         # Parameter speichern
+            $parameter1=$parameter2; $parameter2=shift();       # nur einen neuen Parameter holen
+        }
+
+        # Fall: Parameter2 ist Wert fuer Parameter1
+        else {
+            $namendParameters{"$parameter1"}=$parameter2;
+            $parameter1=shift(); $parameter2=shift();       # zwei neue Parameter holen, da Parameter mit Wert genutzt
+        }
+    }
+
+    # unbenannte Parameter (Parameter die mit KEINEN "-" im Namen ANFANGEN - wie z.B.: "script VALUE")
+    else {
+        push @unnamendParameters,$parameter1;
+
+        # einen neuen Parameter holen
+        $parameter1=$parameter2;
+        $parameter2=shift();
+    }
+}
+
+
+
+## globale Variable bei Bedarf, anhand gegebener Parameter, ueberschreiben
+
+# falls Layouttyp per Parameter uebergeben wurde, diesen hiermit neu setzen
+if (($namendParameters{'-layouttype'} eq 'dialog')||($namendParameters{'-layouttype'} eq 'perl-print')) {
+        $usedGui=$namendParameters{'-layouttype'};
+}
+
+
+##############
+# FUNKTIONEN #
+##############
+
+## gibt die Inhalte eines 2D-Arrays von einer Referenz dessen aus (gedacht fuer Debugging oder als Beispiel) - AUFRUF: ausgabe2DArray(\@array2d);
+sub ausgabe2DArray
+{   
+    my @outputArrayFromReference = @{$_[0]};
+    
+    for my $x ( 0 .. $#outputArrayFromReference )
+    {
+        for my $y ( 0 .. $#{$outputArrayFromReference[$x]} )
+        {
+            print 'Array['.$x.']['.$y.']='.$outputArrayFromReference[$x][$y]."\n";
+        }
+    }
+}
+
+
+## seperate Funktion um LDIF zu senden (SIEHE: http://search.cpan.org/~gbarr/perl-ldap-0.43/lib/Net/LDAP/LDIF.pod)
+sub sendLdifFile
+{
+    my $ldifFilenameToSend=shift;                   # diese Datei wird gesendet
+    my $ldapBind=shift;                     # Parameter fuer das BIND zum LDAP
+    
+    ###############
+    # HIER WEITER #
+    ###############
+    
+    exit
+}
+
+
+## sortiert ein uebergebenes Array mit Werten einer LDAP-Abfrage, wobei das Element mit "dn:" an erster Stelle bleibt
+sub sortLdapValues
+{
+    my @sourceArray=@{$_[0]};                           # Referenz des Quell-Arrays dereferenzieren
+    my @arrayWithoutDn;
+    my @sortedArrayWithoutDn;
+    my @sortedArrayWithDn;
+    my $dnEntry='';
+    
+    # entferne die 'dn:'-Zeile
+    foreach my $tempLine (@sourceArray)
+    {
+        if ($tempLine =~ /^[d|D]{1}[n|N]{1}: /) { $dnEntry=$tempLine; }     # LDAP-Wert mit "dn:" gefunden. Merke diesen, da er nach @tempSort[0] soll.
+        else { push (@arrayWithoutDn,$tempLine); }              # normales LDAP-Attribut gefunden. Schreibe dies in ein Array.
+    }
+    
+    # sortiere das restliche Array (ohne die Zeile mit 'dn:')
+    @sortedArrayWithoutDn=sort(@arrayWithoutDn);
+    
+    # fuege die 'dn:'-Zeile in das sortierte Array hinzu
+    push (@sortedArrayWithDn,$dnEntry);
+
+    # fuege die sortierten restlichen Zeilen in das Array hinzu
+    foreach my $tempLine (@sortedArrayWithoutDn)
+    {
+        push (@sortedArrayWithDn,$tempLine);
+    }
+
+    return @sortedArrayWithDn;
+}
+
+
+sub createPassword
+{
+    
+    # Defaultwerte und Passwort-Variable
+    my $minLengthPassword = shift;
+    my $maxLengthPassword = shift;
+    my $pw='';
+
+    # Liste der zu benutzenden Passwortzeichen 
+    # 
+    # viele verschiedene Zeichen 
+    # my @validChars=(0 .. 9,"a" .. "z","A" .. "Z",'.',',',';',':','@','!','$','%','#','=','-','_','+','?','*');
+    #
+    # wenigere Zeichen
+    # my @validChars=(0 .. 9,"a" .. "z","A" .. "Z",'.',';','!','$','=','-','_','+','*');
+    #
+    # wenigere Zeichen OHNE: 1,l,0,O,o (um die Programmierung, weniger Verwechselungen und einfache CSV-Dateien zu ermoeglichen)
+    my @validChars=(2 .. 9,"a" .. "k","m", "n", "p" .. "z","A" .. "K","M","N","P" .. "Z",'@','!','=','-','+','?','*');
+    
+    my $lenght=(int(rand($maxLengthPassword-$minLengthPassword))+$minLengthPassword);
+    
+    # vor dem ersten Lauf kann das PW nicht OK sein
+    my $pwIsValid=0;
+    
+    # durchlaufe so oft bis PW OK ist
+    while ($pwIsValid<1)
+    {
+        # neues PW erstelln und annehmen das es OK ist
+        $pw='' ;$pw=join("",@validChars[map{rand @validChars}(1..$lenght)]);
+        $pwIsValid=1;
+    
+        # Passwort pruefen nach Vorgabe ob es wirklich OK ist, falls nicht als NICHT-OK kennzeichnen
+        if (!($pw =~ /[A-Z]+/)) { $pwIsValid=0; }                               # war ein GROSSER BUCHSTABE enthalten
+        if (!($pw =~ /[a-z]+/)) { $pwIsValid=0; }                               # war ein kleiner Buchstabe enthalten
+        if (!($pw =~ /[0-9]+/)) { $pwIsValid=0; }                               # war eine Ziffer enthalten
+        if (!($pw =~ /[!@#\$%&\*\(\)\[\]\{\}_\-\+=:;<>,.?\/]+/)) { $pwIsValid=0; }              # war eines dieser Sonderzeichen enthalten
+        if (length($pw)<$minLengthPassword) { $pwIsValid=0; }                           # war es mindestens so lang
+        if (length($pw)>$maxLengthPassword) { $pwIsValid=0; }                           # war es nicht laenger als
+    }
+    
+    return $pw; 
+}
+
+
+## sambaLMPassword erstellen (Noetig fuer Einsatz Windows 95 bis ME.)
+sub createSambaLMPassword {
+
+    my $cleartextPassword = shift;      # das Klartextpasswort holen
+    my $sambaLMPassword;            # fuer das spaetere Samba-LM-Passwort
+    my $sambaNTPassword;            # fuer das spaetere Samba-NT-Passwort (wird NICHT benoetigt, aber mit gesetzt)
+
+    # SAMBA-Passwoerter erstellen
+    ntlmgen $cleartextPassword,$sambaLMPassword,$sambaNTPassword;
+
+    # Rueckgabe des LM-Passwortes
+    return $sambaLMPassword;
+
+}
+
+
+## sambaNTPassword erstellen (Einsetzbar ab Windows NT aufwaerts.)
+sub createSambaNTPassword {
+
+        my $cleartextPassword = shift;          # das Klartextpasswort holen
+        my $sambaLMPassword;                    # fuer das spaetere Samba-LM-Passwort (wird NICHT benoetigt, aber mit gesetzt)
+        my $sambaNTPassword;                    # fuer das spaetere Samba-NT-Passwort
+
+        # SAMBA-Passwoerter erstellen
+        ntlmgen $cleartextPassword,$sambaLMPassword,$sambaNTPassword; 
+
+        # Rueckgabe des NT-Passwortes
+        return $sambaNTPassword;
+
+}
+
+
+### Erstellung von SSHA-512-Passwoertern (SSHA-512 = Salted SHA-512) u.a. nach Doku:
+#### http://search.cpan.org/dist/Crypt-Password-Util/lib/Crypt/Password/Util.pm
+#### http://search.cpan.org/~mshelor/Digest-SHA-5.95/lib/Digest/SHA.pm
+#### http://blog.gauner.org/blog/2010/12/19/handling-salted-passwords-in-perl/
+sub createSsha512Password {
+
+    my $cleartextPassword = shift;          # das Klartextpasswort holen
+    my $salt;               # das SALZ gegen Rainbow-Tables als Random-Byte-Folge
+    my $saltShadow;             # das SALZ im erflaubten Format der /etc/shadow
+    my $fullPasswordLine;           # spaetere Passwort-Zeile '/etc/shadow'-typischen Format
+    my $passwordHash;           # der Passwort-HASH
+    my $passwordLineLdif;           # die Passwort-Zeile im benoetigten Base64-Format
+    
+    # SALT im Pseudo-Base64-Format aus offiziell in /etc/shadow erlaubten-Zeichen erstellen (max. Laenge = 16 Bytes)
+    @validChars=(0..9,'a'..'z','A'..'Z','.','/');
+    $saltShadow=join('',@validChars[map{rand @validChars}(1..16)]);
+    
+    # erstelle Passwort-Zeile '/etc/passwd'-typischen Format (mit Art, Salt und Passwort-Hash) (IST NICHT UMWANDELBAR IN LDIF-FORMAT)
+    $fullPasswordLine=crypt($cleartextPassword,'$6$'.$saltShadow);
+    
+    # SALT aus allen moeglichen Byte-Zeichen erstellen, bei LDAP wegen Base64-Umwandlung moeglich (in /etc/shadow werden nur 12 Bytes genutzt)
+    my @tempArray=(); for my $i (1..16) { push (@tempArray,rand(255)); }
+    $salt=pack('C*',@tempArray);
+        
+    # erstelle LDIF-FORMAT '{ssha512}'.bash64(sha512(PASSWORT.SALT).SALT)
+    $passwordLineLdif='{ssha512}'.encode_base64(Digest::SHA::sha512($cleartextPassword.$salt).$salt,'');
+
+        if ($namendParameters{"--debug"} eq 'SET')
+    {
+        print "\nCLEARTEXT PASSWORD: ".$cleartextPassword."\n";
+        
+        print "\n".'DEBUG: /etc/shadow format ('.length($fullPasswordLine).' Bytes) : '.$fullPasswordLine."\n";
+        print "\nDEBUG: Warning - The /etc/shadow format ist not (easy) ready to convert to the LDIF format.\n\n";
+        
+        print 'DEBUG: LDIF format ('.length($passwordLineLdif).' Bytes) : '.$passwordLineLdif."\n";     
+    
+        my $hexSalt=unpack("H*",$salt);
+        print 'DEBUG: LDIF SALT in HEX: '.$hexSalt."\n";
+    
+        my $hexHash=unpack("H*",(Digest::SHA::sha512($cleartextPassword.$salt)));
+        print 'DEBUG: LDIF HASH in HEX: '.$hexHash."\n";
+    
+        print "\nDEBUG: How to create the hash for LDIF: '{ssha512}'.bash64(sha512(PASSWORT.SALT).SALT)'\n\n";
+    }
+    
+    return $passwordLineLdif;
+}
+
+
+## MD5-Passwort erstellen (MIT SALT)
+sub createSmd5Password {
+
+    my $cleartextPassword = shift;          # das Klartextpasswort holen
+        my $sMd5Password;                       # fuer das spaetere SMD5-Passwort
+    my $salt;               # das SALZ gegen Rainbow-Tables als Random-Byte-Folge
+    my $saltedPasswordHash;         # der versalzene Passwort-Hash
+    
+    # SALT aus allen moeglichen Byte-Zeichen erstellen
+    my @tempArray=(); for my $i (1..8) { push (@tempArray,rand(255)); }
+    $salt=pack('C*',@tempArray);
+    
+    # MD5-Passwort erstellen
+    $saltedPasswordHash=Digest::MD5::md5($cleartextPassword.$salt);
+    $sMd5Password='{SMD5}'.encode_base64($saltedPasswordHash.$salt,'');
+
+    # Debug-Ausgabe inkl. Klartext-Passwort
+        if ($namendParameters{"--debug"} eq 'SET')
+    {
+        print "\nCLEARTEXT PASSWORD: ".$cleartextPassword."\n";
+        
+        print 'DEBUG: LDIF format ('.length($sMd5Password).' Bytes) : '.$sMd5Password."\n";     
+    
+        my $hexSalt=unpack("H*",$salt);
+        print 'DEBUG: LDIF SALT in HEX: '.$hexSalt."\n";
+    
+        my $hexHash=unpack("H*",(Digest::MD5::md5($cleartextPassword.$salt)));
+        print 'DEBUG: LDIF HASH in HEX: '.$hexHash."\n";
+    
+        print "\nDEBUG: How to create the hash for LDIF: '{SMD5}'.bash64(md5(PASSWORT.SALT).SALT)'\n\n";
+    }
+    
+        # Rueckgabe des MD5-Passwort-Hashes
+        return $sMd5Password;
+}
+
+
+## MD5-Passwort erstellen (OHNE SALT)
+sub createMd5Password {
+
+        my $cleartextPassword = shift;          # das Klartextpasswort holen
+        my $md5Password;                        # fuer das spaetere MD5-Passwort
+
+    # MD5-Passwort erstellen
+    $ctx = Digest::MD5->new;
+    $ctx->add($cleartextPassword);
+    $md5Password='{MD5}'.encode_base64($ctx->digest,'');
+
+        # Rueckgabe des MD5-Passwort-Hashes
+        return $md5Password;
+}
+
+
+## Crypt-Passwort erstellen (mit SALT)
+sub createCryptPassword {
+
+        my $cleartextPassword = shift;            # das Klartextpasswort holen
+        my $cryptPassword;                        # fuer das spaetere MD5-Passwort
+
+    # Crypt-Passwort erstellen
+    @chars=(0 .. 9,"a" .. "z","A" .. "Z",".","/");
+    $salt=join("",@chars[map{rand @chars}(1..4)]);
+    $cryptPassword='{crypt}'.crypt($cleartextPassword,$salt);
+
+        # Rueckgabe des Crypt-Passwort-Hashes
+        return $cryptPassword;
+}
+
+
+## Die folgende Funktion testet Strings und ersetzt (falls moeglich) ungueltige Zeichen darin.
+sub testSimpleChars {
+
+    $toTest = shift;
+    $typOfValue = shift;
+
+    # Testen auf Gueltigkeit
+    if ($toTest !~ m/^[a-zA-Z0-9\-\$\.\@]+$/)
+    {
+        # Info ausgeben, dass Wert fehlerhaft ist
+        $tmpOutputMessage.="\n".'Error: '.$typOfValue.' "'.$toTest.'" has invalid characters.'."\n";
+
+        # automatische Ersetzungen durchfuehren
+        $toTest =~ s/\ä/ae/g;   $toTest =~ s/\ö/oe/g;   $toTest =~ s/\ü/ue/g;
+        $toTest =~ s/\Ä/Ae/g;   $toTest =~ s/\Ö/Oe/g;   $toTest =~ s/\Ü/ue/g;
+        $toTest =~ s/"a/ae/g;   $toTest =~ s/"o/oe/g;   $toTest =~ s/"u/ue/g;
+        $toTest =~ s/"A/Ae/g;   $toTest =~ s/"O/Oe/g;   $toTest =~ s/"U/ue/g;
+        $toTest =~ s/\ő/o/g;     $toTest =~ s/\*//g;     $toTest =~ s/\\//g;
+        $toTest =~ s/://g;      $toTest =~ s/_//g;      $toTest =~ s/\ß/ss/g;
+        $toTest =~ s/\é/e/g;    $toTest =~ s/\ó/o/g;    $toTest =~ s/\á/a/g;
+        
+        # eine interaktive Aenderung ist noetig
+        if ($toTest !~ m/^[a-zA-Z0-9]+$/)
+        {
+            $inputSTDIN='';
+            while ($inputSTDIN eq '')                                       # leere Eingaben verhindern
+            {
+                $inputSTDIN=inputText($tmpOutputMessage."\nPlease enter a valid value: ",$toTest);      # Eingabe lesen
+            }
+            $toTest=testSimpleChars($inputSTDIN,$typOfValue);                           # rekursiv aufrufen (um neue Eingabe zu testen)
+        }
+
+        # Info zur Ersetzung
+        $tmpOutputMessage.='   The Value '.$typOfValue.' was changed to "'.$toTest.'".'."\n";               # kann mehrfach ausgegeben werden
+    }
+    return $toTest;                                                     # Rueckgabe (evtl. veraendert)
+}
+
+## NAHEZU IDENTISCHE FUNKTION wie testSimpleChars nur dass hier mehr Zeichen in der Variablen erlaubt werden
+sub testSimpleStrings {
+
+    $toTest = shift;
+    $typOfValue = shift;
+
+    # Testen auf Gueltigkeit
+    if ($toTest !~ m/^[a-zA-Z0-9\ .\-_]+$/)
+    {
+        # Info ausgeben, dass Wert fehlerhaft ist
+        $tmpOutputMessage.="\n".'Error: '.$typOfValue.' "'.$toTest.'" has invalid characters.'."\n";
+
+        # automatische Ersetzungen durchfuehren
+        $toTest =~ s/\ä/ae/g;   $toTest =~ s/\ö/oe/g;   $toTest =~ s/\ü/ue/g;
+        $toTest =~ s/\Ä/Ae/g;   $toTest =~ s/\Ö/Oe/g;   $toTest =~ s/\Ü/ue/g;
+        $toTest =~ s/"a/ae/g;   $toTest =~ s/"o/oe/g;   $toTest =~ s/"u/ue/g;
+        $toTest =~ s/"A/Ae/g;   $toTest =~ s/"O/Oe/g;   $toTest =~ s/"U/ue/g;
+        $toTest =~ s/\ß/ss/g;   $toTest =~ s/\$//g;     $toTest =~ s/\,/ /g;
+        $toTest =~ s/\#/ /g;    $toTest =~ s/ë/e/g;     $toTest =~ s/\ő/o/g;
+        $toTest =~ s/\é/e/g;    $toTest =~ s/\ó/o/g;    $toTest =~ s/\á/a/g;
+
+        # eine interaktive Aenderung ist noetig
+        if ($toTest !~ m/^[a-zA-Z0-9@\ .\-_]+$/)
+        {
+            $inputSTDIN='';
+            while ($inputSTDIN eq '')                               # leere Eingaben verhindern
+            {
+                $inputSTDIN=inputText($tmpOutputMessage."\nPlease enter a valid value: ",$toTest);      # Eingabe lesen
+            }
+            $toTest=testSimpleStrings($inputSTDIN,$typOfValue);                     # rekursiv aufrufen (um neue Eingabe zu testen)
+        }
+
+        # Info zur Ersetzung
+        $tmpOutputMessage.='   The Value "'.$typOfValue.'" was changed to "'.$toTest.'".'."\n"; # kann mehrfach ausgegeben werden
+    }
+    return $toTest;                                             # Rueckgabe (evtl. veraendert)
+}
+
+## Die folgende Funktion testet, ob bestimmte Werte schon in einem Array sind und fragt nach Alternativwert
+sub testUsedValues {
+
+    $toTest     = shift;                    # der zu testende Wert
+    $typOfValue = shift;                    # Art des Wertes
+    $testList   = shift;                    # Liste in der der Wert gesucht wird (ARRAY welches als Referenz uebergeben wurde)
+    $autoAppend = shift;                    # automatisch zu ergaenzender Wert AM ENDE des Strings nach dessen Eingabe
+
+    # teste ob das Login schon verwendet wird
+    foreach $i (@{$testList})
+    {  
+        if (($i eq $toTest)&&(!(($typOfValue eq 'login')&&($i eq $noLoginName))))
+        {
+            $inputSTDIN='';
+            while ($inputSTDIN eq '')           # leere Eingaben verhindern
+            {
+                $tmpOutputMessage="\n".'The '.$typOfValue.' with the value "'.$toTest.'" is forbidden or used before.'."\n";
+                if ($typOfValue eq 'login') {
+                    $inputSTDIN=inputText($tmpOutputMessage."Please type an other name here OR type '".$noLoginName."' to skip creating this account: ",$toTest);
+                }
+                else {
+                    $inputSTDIN=inputText($tmpOutputMessage."Please type an other name OR break this script here: ",$toTest);
+                }
+                $inputSTDIN.=$autoAppend;       # falls gewuenscht Eingabe erweitern
+            }
+            $toTest=testUsedValues($inputSTDIN,$typOfValue,\@{$testList});              # rekursiver Test (Fehleingabe)
+        }
+    }
+    return $toTest;
+}
+
+
+## Funktion: Liste freier ID erstellen - also alle moegliche IDs testen ob diese schon benutzt sind, bis genuegend freie IDs gefunden wurden
+sub searchFreeIDs {
+
+    $numberNeededIDs = shift;                                   # Anzahl benoetigter IDs
+    $minID = shift;                                         # kleinste ID die gewaehlt werden darf
+    $maxID = shift;                                         # groesste ID die gewaehlt werden darf
+    $typOfIDs = shift;                                      # Art der IDs die gesucht werden (nur fuer evtl. Fehlermeldung)
+    $listUsedIDs = shift;                                       # Referenz zum Array schon benutzer IDs
+    $listFreeIDs = shift;                                       # Referenz zum Array unbenutzer IDs
+
+    $numFoundedIDs = 0;                                     # Anzahl schon gefundener IDs
+    $numlistUsedIDs = scalar(@{$listUsedIDs});                          # Anzahl schon benutzer IDs
+
+    for ($i=$minID; $i<=$maxID; $i++)                               # durchsuche alle moeglichen IDs
+    {
+        $thisIDIsFree=1;                                    # Perl 1,0 entspricht: TRUE,FALSE
+
+        for ($j=0; $j<$numlistUsedIDs; $j++) {                          # teste in allen bereits benutzten IDs
+            if ($i eq ${$listUsedIDs}[$j]) { $thisIDIsFree=0; }             # diese ID war schon verwendet
+        }
+
+        if ($thisIDIsFree==1) { push @{$listFreeIDs},$i; $numFoundedIDs++;}         # eine freie ID wurde gefunden
+        if ($numFoundedIDs==$numberNeededIDs) { $i=$maxID+1; }                  # vorzeitiger Abbruch (genuegend IDs gefunden
+    }
+
+    # Fehlerausgabe wenn nicht genuegend freie IDs im System gefunden werden konnten
+    # Das Probem kann evtl. nur durch Anpassung der minIDs und maxIDs oder durch loeschen alter
+    # Benutzerkonten geloesst werden.
+    if ($numFoundedIDs!=$numberNeededIDs) {
+        $tmpOutputMessage.="\n\nERROR: Could not find enough free $typOfIDs in the system. EXIT HERE !!!\n";
+        outputAndDie($tmpOutputMessage."   Please check that and/or change the settings in the config file !\n\n");
+    }
+
+    return 0;
+}
+
+
+## Funktion: LDAP-Suche ueber PERL. Also suche Werte im LDAP mit bestimmten Eigenschaften und an bestimmter Stelle ...
+sub ldapValueSearch {
+
+    # BEISPIEL-EINSATZ:
+    ## @searchArray=('dn','uid','loginShell');                          # falls Array leer ist, werden alle Elemente angezeigt
+    ## ldapValueSearch($ldapUserBase,\@searchArray,' ','n',\@ergebnisArray,'/tmp/out.txt','','',' : ');
+    ## foreach $i (@ergebnisArray) { print "$i\n"; }
+
+    # Parameter holen
+    $ldapBase = shift;                                      # die zu durchsuchende LDAP-BASE
+    $searchingValues = shift;                                   # Referenz eines Arrays mit den zu suchenden Werten im LDAP
+    $delimiterAfterEachLdapObject = shift;                              # Textzeichen, die nach jedem LDAP-Objekt folgen
+    $getOnlyValues = shift;                                     # falls 'y', werden die Namen der Werte NICHT angezeigt
+    $returnArray = shift;                                       # Referenz des Arrays fuer die Aus-/Uebergabe
+    $returnFile = shift;                                        # falls gesetzt, Dateiname fuer die Ausgabe der Werte
+    $bindLogin = shift;                                     # Loginname fuer das LDAP-BIND
+    $bindPassword = shift;                                      # Password fuer das LDAP-BIND
+    $delimiterCSV = shift;                                      # falls gesetzt, werden die Wert im CVS-Stil mit diesem Trennzeichen zurueck gegeben
+    
+    # Rueckgabe-Array leeren
+    @{$returnArray}=();
+
+    # neues Array fuer optional Rueckgabe im CVS-Stil (uid : uidNumber : cn : ...)
+    @csvReturnArray=();
+
+    # LDAP-Verbindung aufbauen
+    $ldap = Net::LDAP->new($ldapServer) or outputAndDie("ERROR: $@");               # Verbindung zu LDAP-Server definieren
+    
+    # LDAP-Bind herstellen
+    if ($bindLogin eq '') {
+        # anonyme LDAP-Verbindung aufbauen (gibt nur global freigebene Werte zurueck)
+        $mesg = $ldap->bind (version => 3);
+    } else {
+        # authentivizierte LDAP-Verbindung herstellen, ueber Login und Passwort
+        $mesg = $ldap->bind ($bindLogin, password => $bindPassword, version => 3);              
+    }
+    
+    
+    
+    # LDAP-Anfrage stellen (die Angabe eines Filters ist fuer den Einsatz von 'attrs' (Datenauswahl) noetig)
+    # ALT DEBIAN 6: $mesg = $ldap->search(base => $ldapBase,filter => "(objectClass=*)", attrs => @{$searchingValues});
+    #
+    $mesg = $ldap->search ( base => $ldapBase,                          # Start des LDAP Zweiges
+                    filter => "(objectClass=*)",                        # filter fuer die Suche
+                scope => "sub"                              # Tiefe der Suche (base="nur am Knoten", one="eine Ebene unter dem Knoten", sub="vom Knoten zu allen Unterknoten")
+                  );
+
+    # LDAP-Fehlerausgabe machen
+    $mesg->code && outputAndDie("[searching in LDAP base '".$ldapBase."'] ".$mesg->error);      # Suche starten oder Fehler ausgeben
+
+    # bei leerem Suchfilter ALLES ausgeben -> dazu Werte bestimmen
+    if (scalar(@{$searchingValues}) == 0) {
+        push @{$searchingValues},'dn';                              # zuerst und auch 'dn' ausgeben
+        foreach $entry ($mesg->entries) {                           # durchlaufe ALLE Objekte
+            push @{$searchingValues},$entry->attributes (nooption => 1);            # speichere alle Suchfilternamen des aktuellen Objektes
+        }
+    }
+
+    # doppelte Suchfilter entfernen (da ohne Suchfilterangabe jedes Objekt seine Attribute in Array geschrieben hat -> viele doppelte Attribute)
+    undef %tmp;                                         # temp. Hash fuer vorhandene Werte
+    my @tmpUniqueSearchingValues = grep(!$tmp{$_}++, @{$searchingValues});              # falls Wert bisher nicht gefunden, fuege ihn hinzu
+    @{$searchingValues} = @tmpUniqueSearchingValues;                        # ersetze bereinigtes Array durch altes Array (ueberschreiben)
+
+    $objectNumber=0;                                        # die Zeilennummer in der CSV-Ausgabe
+    
+    # LDAP-Suchergebnisse speichern
+    foreach $entry ($mesg->entries) {                               # durchlaufe alle Objekte
+        foreach $value (@{$searchingValues}) {                          # durchlaufe alle Eintraege eines Objektes
+            if ($value =~ /^[d|D]{1}[n|N]{1}$/) {                       # falls 'dn' gesucht
+                if ($getOnlyValues eq 'y') {
+                    push @{$returnArray},($entry->dn);              # schreibe dn in Array zurueck (SONDERFALL)
+                    $csvReturnArray[objectNumber].=($entry->dn).$delimiterCSV;  # schreibe Wert in das Array fuer das CSV
+                } else {
+                    push @{$returnArray},('dn: '.$entry->dn);           # schreibe dn in Array zurueck (SONDERFALL) mit NAMEN ('dn: ')
+                    $csvReturnArray[objectNumber].='dn: '.($entry->dn).$delimiterCSV;   # schreibe Wert in das Array fuer das CSV
+                }
+            }
+            if ($entry->get_value($value) ne '') {                      # falls Wert nicht leer
+                (@tmpValues)=$entry->get_value($value);                 # hole ALLE Elemente dieses Suchfilters, da einige Eintraege wie "memberUid" in LDAP-Gruppen mehrfach vorkommen
+                foreach $tmpValueItem (@tmpValues) {
+                    if ($getOnlyValues eq 'y') {
+                        push @{$returnArray},($tmpValueItem);           # schreibe ALLE (auch doppelte) Eintaege in Array zurueck
+                        $csvReturnArray[objectNumber].=$tmpValueItem.$delimiterCSV; # schreibe Wert in das Array fuer das CSV
+                        } else {
+                        push @{$returnArray},($value.': '.$tmpValueItem);   # schreibe ALLE (auch doppelte) Eintaege in Array zurueck MIT NAMEN
+                        $csvReturnArray[objectNumber].=$value.': '.$tmpValueItem.$delimiterCSV; # schreibe Wert in das Array fuer das CSV
+                    }
+                }
+            }
+        }
+        if ($delimiterAfterEachLdapObject ne '') {                      # falls ein Trennzeichen definiert ist nicht leer
+            push @{$returnArray},$delimiterAfterEachLdapObject;                 # schreibe neues Array-Element mit dem angegebenen Wert
+        }
+        $objectNumber++; $csvReturnArray[objectNumber].="\n"; $objectNumber++;
+    }
+
+    # LDAP-Verbindung sauber beenden
+    $mesg = $ldap->unbind;
+
+    # falls die Ausgabe im CSV-Stil gewuenscht war, ersetze die Rueckgabe-Arrays
+    if ($delimiterCSV ne '')
+    {
+        @{$returnArray}=@csvReturnArray;
+    }
+    
+    # Werte in Datei schreiben, falls gewuenscht
+    if ($returnFile ne '') {                                    # Falls Dateiname angegeben ...
+        open neueDatei, '>'.$returnFile or outputAndDie("ERROR: Could not write into the file '$returnFile' .");
+        foreach my $i (@{$returnArray}) {
+            print neueDatei "$i\n";                             # AUCH alle gefundene Werte des Arrays in Datei schreiben
+        }
+        close neueDatei;
+    }
+    
+    return 0;
+}
+
+
+## Funktion: gibt neben evtl. Fehlermeldungen ein Array '$returnArray' mit allen Werten eines gesuchten Attributes '$searchingLdapValue' in dem LDAP-Objekt '$ldapBase' zurueck
+sub getSimpleLdapValue {
+
+    # Parameter holen
+    $ldapBase = shift;                                                  # die zu durchsuchende LDAP-BASE
+    $searchingLdapValue = shift;                                                # Variable mit den zu suchenden Werten im LDAP
+    $writeNamesOfAttributs = shift;                                             # falls 'y' wird auch der Attribtname mit zurueck gegeben (z.B. anstelle nur '1000' wird 'uid: 1000' gespeichert)
+
+    # Variable die Fehlermeldungen speichert, falls noetig
+    my $errorMessage='';                                                    # speichert Fehlermeldungen
+    my $numbersOfVaulues=0;                                                 # speichert Anzahl der Funde
+    my @returnArray=();                                                 # speichert gefundene Ergebnisse
+    
+    # LDAP-Verbindung aufbauen
+    $ldap = Net::LDAP->new($ldapServer) or return ($@,$numbersOfVaulues,@returnArray);                  # Verbindung zu LDAP-Server definieren
+
+    # LDAP-Verbindung aufbauen
+    $mesg = $ldap->bind(version => 3);                                          # anonyme Verbindung herstellen
+    # $mesg = $ldap->bind("LOGIN", password =>"PASSWORD", version => 3);                            # authentivizierte Verbindung herstellen
+    
+    # LDAP-Anfrage definieren (die Angabe eines Filters ist fuer den Einsatz von 'attrs' (Datenauswahl) noetig)
+    $mesg = $ldap->search ( base => $ldapBase,                                      # Start des LDAP Zweiges
+                    filter => "(objectClass=*)",                                    # filter fuer die Suche
+                scope => "sub",                                         # Tiefe der Suche (base="nur am Knoten", one="eine Ebene unter dem Knoten", sub="vom Knoten zu allen Unterknoten")
+                attrs => @{$searchingLdapValue}                                 # Array von Atributen nach dem im LDAP gesucht werden soll
+                  );
+    
+    # die definierte LDAP-Suche nun starten oder mit Fehlermeldung beenden
+    $mesg->code && return ($mesg->error,$numbersOfVaulues,@returnArray);                            
+        
+    # LDAP-Suchergebnisse speichern
+    foreach $entry ($mesg->entries) {                                           # durchlaufe alle Objekte (wie die Rueckgabezeilen einer LDIF-Dateien)
+        
+        my (@ldapValuesArray)=$entry->get_value($searchingLdapValue);                           # alle gefundenen Werte in ein Array (manche Atribute kommen mehrfach vor) schreiben, auf die der Suchfilter passt
+        
+        if ($searchingLdapValue =~ /^[d|D]{1}[n|N]{1}$/) { $ldapValuesArray[0]=($entry->dn); }              # Sonderfall: UEBERSCHREIBE den gefundenen LDAP-Wert mit dem "dn:" falls dieser gefragt war
+
+        foreach my $ldapValue (@ldapValuesArray)                                    # durchlaufe alle gefundenen Werte der Suchanfrage 
+        {
+            if ($ldapValue ne '')                                           # leere Werte (wie z.B. 'uid: ') nicht beachten
+            {           
+                if ($writeNamesOfAttributs eq 'y') { $ldapValue=$searchingLdapValue.': '.$ldapValue; }      # ergaenze den Fund um den NAMEN (also anstelle z.B. fuer eine 'uid' nur den Wert '1000' zu schreiben, schreibe 'uid: 1000')
+                push (@returnArray,$ldapValue);                                 # schreibe den Fund nun in das LDAP-Array
+                $numbersOfVaulues++;                                        # da neues LDAP-Ergebnis gefunden den Zaehler erhoehen
+            }
+        }
+    }
+
+    # LDAP-Verbindung sauber beenden
+    $mesg = $ldap->unbind;
+    
+    # Ausgabe der Werte im Debug-Modus
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+        $tmpOutputMessage="DEBUG: Searching in the base '".$ldapBase."' for the value of '".$searchingLdapValue."'.\n"; # Ausgabe was gesucht wird
+        $tmpOutputMessage.='DEBUG: LDAP ERROR: '.$errorMessage."\n";                            # Ausgabe der LDAP-Fehler
+        $tmpOutputMessage.='DEBUG: NUMBERS OF FOUND: '.$numbersOfVaulues."\n";                      # Ausgabe der Anzahl der LDAP-Objekte
+        
+        my $tmpValues=''; my $counter=1;
+        foreach my $i (@returnArray) { $tmpValues.='('.$counter.') '.$i."\n"; $counter++; }             # setze die gefundenen LDAP-Objekte zusammen
+        $tmpOutputMessage.="DEBUG: FOUND IN LDAP:\n".$tmpValues."\n";
+        outputInfo($tmpOutputMessage);                                          # Ausgabe aller gefundenen LDAP-Objekte
+        }
+    
+    # Rueckgabe der LDAP-Fehlermeldungen, der Anzahl der Funde, der gefundenen Werte
+    return ($errorMessage,$numbersOfVaulues,@returnArray);
+}
+
+
+###################################################################################
+### AUSGABE-FUNKTIONEN: Ausgabe erfolgt per perl-print-funktion oder per dialog ###
+###################################################################################
+
+## Funktion: Eine einfache JA/NEIN Frage an den Benutzer.
+sub yesNoQuestion
+{
+    my $outputMessage = shift;                          # auszugebender Text VOR der Frage
+    my $yesInput = shift;                               # noetiger Input durch Benutzer fuer YES
+    my $noInput = shift;                                # noetiger Input durch Benutzer fuer NO
+    my $defaultValue = shift;                           # Default-Wert definieren fuer Benutzereingabe
+
+    # fehlerhafte Uebergabe abfangen
+    if (!(($defaultValue eq $yesInput)||($defaultValue eq $noInput))) {
+        $defaultValue = $yesInput;                      # Default-Wert auf $yesInput setzen falls keine Uebergabe
+    }
+
+    # evtl. alte Eingaben loeschen
+    my $userInput='###maybe###';
+
+    if ($usedGui eq 'perl-print')
+    {
+        while (!(($userInput eq $yesInput)||($userInput eq $noInput)))
+        {
+            # print $windowTitle;
+            print $outputMessage." [$yesInput/$noInput] : ";
+            chomp($userInput=<STDIN>);
+            if (!(($userInput eq $yesInput)||($userInput eq $noInput)))
+            { print "\n!!! Wrong Input. Please type only '$yesInput' or '$noInput', here.\n\n"; }
+        }
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # Ja/Nein-Abfrage in Dialog (0 0 sorgt fuer AUTO-FORMAT bei der Groesse !!!)
+        if ($defaultValue eq $yesInput) { $returnSystem=system('dialog --backtitle "'.$windowTitle.'" --yesno "'.$outputMessage.'" 0 0'); }
+        else { $returnSystem=system('dialog --backtitle "'.$windowTitle.'" --defaultno --yesno "'.$outputMessage.'" 0 0'); }
+        if ($returnSystem == 0) { $userInput=$yesInput; } else  { $userInput=$noInput; }
+    }
+
+    $tmpOutputMessage='';               # temp. Ausgaben loeschen um doppelte Ausgaben zu verhindern
+    return $userInput;
+}
+
+
+## Funktion: Eine Text-Eingabe durch den Benutzer.
+sub inputText
+{
+    my $outputMessage = shift;                  # auszugebender Text VOR der Eingabe
+    my $initText = shift;                       # der vordefinierte Text im Textfeld bzw. Standardwert bei leerer Eingabe
+
+    if ($usedGui eq 'perl-print')
+    {
+        # Textausgabe vor der Dateneingabe (mit oder ohne Default-Wert $initText)
+        if ($initText ne '') { print $outputMessage.'['.$initText.']: '; }
+        else { print $outputMessage; }
+        
+        # Eingabe holen und RETURN entfernen
+        chomp ($userInput=(<STDIN>));               
+        
+        # falls leere Eingabe und Default-Text $initText vorhanden, diesen verwenden
+        if (($initText ne '')&&($userInput eq ''))
+        {
+            $userInput=$initText;
+        }
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # evtl. alte Eingaben loeschen
+        $userInput='';
+
+        # versuche Schreibtest auf Eingabedatei
+        open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not overwrite the file $dialogTempFile .");
+        print myOpenFile '';
+        close myOpenFile;
+
+        # Dialog anzeigen und Eingaben in Datei speichern
+        system('dialog --backtitle "'.$windowTitle.'" --inputbox "'.$outputMessage.'" 0 0 '.$initText.' 2>'.$dialogTempFile);
+
+        # Eingaben auslesen
+        open (myOpenFile, '<'.$dialogTempFile) or outputAndDie("ERROR: Could not read the file $dialogTempFile .");
+        while (<myOpenFile>) { chomp $_; $userInput=$_; }
+        close myOpenFile;
+
+        # Alte Eingabedatei loeschen
+        open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not delete the file $dialogTempFile .");
+        print myOpenFile '';
+        close myOpenFile;
+
+        # Ende falls keine Eingabe erfolgte oder "Abbruch" gewaehlt
+        if ($userInput eq '') { outputAndDie("Stop here. (There was no input in the last dialog.)"); }
+    }
+
+    $tmpOutputMessage='';                       # temp. Ausgaben loeschen um doppelte Ausgaben zu verhindern
+    return $userInput;                      # Eingabe zurueckliefern
+}
+
+## Funktion: Eine verstecke Eingabe durch den Benutzer.
+sub inputHiddenText
+{
+    my $outputMessage = shift;                  # auszugebender Text VOR der Eingabe
+    my $initText = shift;                       # der vordefinierte Text im Textfeld (kann von Benutzer geaendert werden)
+
+    if ($usedGui eq 'perl-print')
+    {
+        # print $windowTitle;
+        print $outputMessage;
+        ReadMode 2;                     # Umschalten auf unsichtbare Eingabe
+        chomp($userInput=ReadLine(0));              # Eingabe holen und RETURN entfernen
+        ReadMode 0;                     # Umschalten auf sichtbare Eingabe
+        print "\n";                     # Zeilenumbruch der Passworteingabezeile
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # evtl. alte Eingaben loeschen
+        $userInput='';
+
+        # versuche Schreibtest auf Eingabedatei
+        open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not overwrite the file $dialogTempFile .");
+        print myOpenFile '';
+        close myOpenFile;
+
+        # Dialog anzeigen und Eingaben in Datei speichern
+        system('dialog --backtitle "'.$windowTitle.'" --passwordbox "'.$outputMessage.'" 0 0 '.$initText.' 2>'.$dialogTempFile);
+
+        # Eingaben auslesen
+        open (myOpenFile, '<'.$dialogTempFile) or outputAndDie("ERROR: Could not read the file $dialogTempFile .");
+        while (<myOpenFile>) { chomp $_; $userInput=$_; }
+        close myOpenFile;
+
+        # Alte Eingabedatei loeschen
+        open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not delete the file $dialogTempFile .");
+        print myOpenFile '';
+        close myOpenFile;
+
+        # Ende falls keine Eingabe erfolgte oder "Abbruch" gewaehlt
+        # if ($userInput eq '') { outputAndDie("ABBRUCH, da KEINE EINGABE im letzten Dialog erfolgte."); }
+    }
+
+    $tmpOutputMessage='';                       # temp. Ausgaben loeschen um doppelte Ausgaben zu verhindern
+    return $userInput;                      # Eingabe zurueckliefern
+}
+
+
+## Funktion: Ein Passwort-Eingabe-Dialog (bestehend aus zwei unsichtbaren Eingaben mit Ueberpruefung und definierten Regel fuer das Passwort)
+sub inputPassword
+{
+    my $passwordText1 = shift;
+    my $passwordText2 = shift;
+    my $minLength = shift;
+    my $maxLength = shift;
+    my $level = shift;
+    my $password = shift;
+    
+    my $pw1="1";                                # Passwort-Eingabe 1 
+    my $pw2="2";                                # Passwort-Eingabe 2 (bewusst unterschieden um while-Schleife zu erfuellen)
+    my $passwordLoops=1;                        # Anzahl der Schleifen der Passworteingabe-Versuche
+    
+    # Eingabe / Uebergabe der Passwoerter
+    while ($pw1 ne $pw2)
+    {
+        # Abbruch, wenn mehr als 7 Versuche erfolglos waren
+        if ($passwordLoops > 7)
+        {
+            outputAndDie("Too many password attempts.");
+        }
+        
+        # Passwort aus Uebergabe oder per verstecker Eingabe holen
+        if (($password ne '')&&($passwordLoops==1))
+        {
+            ## falls das Passwort als Parameter uebergeben wurde nutze dieses als Eingabe (nur beim ersten Versuch um Endlosschleifen zu vermeiden)
+            $pw1=$password;
+            $pw2=$password;
+        }
+        else
+        {
+            ## starte eine (neue) Passwort-Eingabe
+            
+            # Passwort-Level: 0 ... keine Pruefung # 1 ... Laenge muss OK sein # 2 ... Level 1 + GROSS- & kleinbuchstabe vorhanden # 3 ... Level 2 + Sonderzeichen oder Ziffer vorh. # 4 ... Level 3 + Sonderzeichen und Ziffer vorhanden # 5 ... Level 4 + Woerterbuchtest mit cracklib
+            if ($level==0) { outputInfo('ANY passwords are permitted here. Please be careful and use a good one.'); }
+            if ($level==1) { outputInfo('Well formed password needs a length between '.$minLength.' and '.$maxLength.' characters.'); }
+            if ($level==2) { outputInfo('Well formed password needs both UPPER and lower case LETTERS and a length between '.$minLength.' and '.$maxLength.' characters.'); }
+            if ($level==3) { outputInfo('Well formed password needs both UPPER and lower case LETTERS and NUMBER or a special SYMBOL. The length must be between '.$minLength.' and '.$maxLength.' characters.'); }
+            if ($level>=4) { outputInfo('Well formed password needs both UPPER and lower case LETTERS, at least one NUMBER and one special SYMBOL. The length must be between '.$minLength.' and '.$maxLength.' characters.'); }
+            
+            # Eingabe des ersten Passworted
+            $pw1=inputHiddenText($passwordText1,'');        # Eingabe des ersten Passwortes
+        }
+
+        $errorMsg='';                           # Variable fuer die Fehlermeldungen leeren
+
+        # Ausgabe des Passwortes im KLARTEXT fuers DEBUGGING
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+            outputInfo('CLEARTEXT PASSWORD 1: '.$pw1."\n");
+        }
+        
+        # Level 1: Laenge pruefen
+        if ($level>=1)
+        {
+            if (length($pw1)<$minLength) { $errorMsg.="- Your password is too short.\n"; $pw2='differ'.$pw1; }
+            if (length($pw1)>$maxLength) { $errorMsg.="- Your password is too long.\n"; $pw2='differ'.$pw1; }
+        }
+        
+        # Level 2: Gross- + Kleinbuchsten enthalten ?
+        if ($level>=2)
+        { 
+            if (!($pw1 =~ /[A-Z]+/)) { $errorMsg.="- You need at least one UPPER case LETTER in your password.\n"; $pw2='differ'.$pw1; }
+            if (!($pw1 =~ /[a-z]+/)) { $errorMsg.="- You need at least one LOWER case LETTER in your password.\n"; $pw2='differ'.$pw1; }
+        }
+
+        $passwordHasSymbol=0; if ($pw1 =~ /[!@#\$%&\*\(\)\[\]\{\}_\-\+=:;<>,.?\/]+/) { $passwordHasSymbol=1; }
+        $passwordHasNumber=0; if ($pw1 =~ /[0-9]+/) { $passwordHasNumber=1; }
+        
+        # Level 3: Symbole ODER Zahlen enthalten
+        if ($level==3)
+        { 
+            if (! (($passwordHasSymbol==1)||($passwordHasNumber==1)) ) { $errorMsg.="- Your password need a NUMBER OR one of this special SYMBOLS: '".'!@#$%&*()[]{}_-+=:;<>,.?/'."'\n"; $pw2='differ'.$pw1; }
+        }       
+        
+        # Level 4: Symbole UND Zahlen enthalten
+        if ($level>=4)
+        { 
+            if (! (($passwordHasSymbol==1)&&($passwordHasNumber==1)) ) { $errorMsg.="- Your password need a NUMBER AND one of this special SYMBOLS: '".'!@#$%&*()[]{}_-+=:;<>,.?/'."'\n"; $pw2='differ'.$pw1; }
+        }
+
+        # Level 5: Woerterbuchtest (benutzt Cracklib ueber Perl, analog zum Kommando /usr/sbin/cracklib-check) - benoetigt unter debian 8: 'apt-get install libcrack2'
+        if ($level >= 5)
+        {
+            # Info: Die cracklib sollte bei einem Passwort wie "Start.1234" eine Fehlermeldung zurueckgeben.
+            
+            #
+            # Woerterbuchtest von Passwoertern ueber die PERL-Bibliothek (leider nicht in OpenSUSE vorhanden, deswegen deaktiviert)
+            #
+            
+            # benoetigt: apt-get install libcrypt-cracklib-perl  -  dieses Perl-Modul ist jedoch leider nicht auf SLES 11 und OpenSuSE 13.1 vorhanden
+            # use Crypt::Cracklib;
+            # my $cracklibMessage=fascist_check($pw1);
+            # if ($cracklibMessage ne 'ok') { $errorMsg.='- >'.$cracklibMessage."<\n"; $pw2='differ'.$pw1; }
+            
+            #
+            # Es folgt der Test ueber die Linux-Kommandozeile. Dabei wird das Klartextpasswort in eine named PIPE geschrieben und nicht in eine echte Datei.
+            #
+            
+            # teste ob die Befehle zum pruefen des Kennwortes ueberhaupt existiert
+            if (!(-x '/usr/sbin/cracklib-check')) { outputAndDie("The system command '/usr/sbin/cracklib-check' DOES NOT EXISTS !!!\n"); }
+            if (!(-x '/usr/bin/awk')) { outputAndDie("The system command '/usr/bin/awk' DOES NOT EXISTS !!!\n"); }
+            
+            # lege eine PIPE an und setze die Rechte und prufe dies
+            my $passwordPipe='/tmp/.checkfile_uid_'.$<.'_at_'.$thisTime;
+            my $testResultFile=$passwordPipe.'.result';
+            system ("/usr/bin/mkfifo $passwordPipe; echo 'ERROR' > $testResultFile");
+            system ("/bin/chmod 600 $passwordPipe $testResultFile || echo 'INTERNAL SYSTEM ERROR: Please ask the System Administrator for help.'");
+            
+            # benutze system zum Testen des Passwortes mit cracklib (Rueckgabe 'OK' bzw. die Fehlermeldung + Zeilenumbruch)
+            system ("/bin/cat ".$passwordPipe." | /usr/sbin/cracklib-check | /usr/bin/awk -F ': ' '{ print ".'$2'." }' > ".$testResultFile." &");
+
+            # Spezialfall: Falls das Passwort leer ist, setze ein ENTER. Denn ohne ein Passwort gibt es von cracklib-check keine Meldung zurueck.
+            if (length($pw1) < 1) { $pw1="\n"; }
+            
+            # das Passwort in die Pipe senden und damit an das Kommando "cracklib-check" (vermutlich sicherer als es im Dateisystem zu speichern)
+            open (myPipeFile, '>'.$passwordPipe) or outputAndDie("ERROR: Could not write to the file '$passwordPipe'.");
+                print myPipeFile $pw1;
+            close (myPipeFile);
+            
+            # warte bis der Prozess mit der Pipe beendet wurde (ganz ohne etwas abzuwarten klappte es im Test oft nicht)
+            system ("/bin/sleep 0.5; /bin/cat ".$testResultFile." > /dev/null");
+        
+            # Ergebnis einlesen und Zeilenumbruch der Nachricht entfernen
+            open (passwordResult, '<'.$testResultFile) or outputAndDie("ERROR: Could not read to the file '$testResultFile'.");
+            while (<passwordResult>)
+            {
+                # das Ergebnis des Tests einlesen (und Zeilenumbruch entfernen)
+                chomp $_; $cracklibMessage=$_;
+            }
+            close (passwordResult);
+                        
+            # falls Antwort nicht 'OK', merke die Fehlermeldung und lasse das Passwort spaeter neu eingeben
+            if ($cracklibMessage eq '') { print "Note: Could not test the password with cracklib. This is not a problem now."; }
+            if ($cracklibMessage ne 'OK') { $errorMsg.='- "'.$cracklibMessage.'"'."\n"; $pw2='differ'.$pw1; }
+            
+            # temporaere Dateien loeschen und zur Sicherheit prüfen (falls die Datein nicht loeschbar sind, Fehler ausgeben Passwort 
+            unlink($passwordPipe);
+            unlink($testResultFile);
+            if (-e $passwordPipe) { $errorMsg="\nPASSWORD FILE ERROR 1: Please ask the System Administrator for help.\n\n"; $pw2='differ'.$pw1; }
+            if (-e $testResultFile) { $errorMsg="\nPASSWORD FILE ERROR 2: Please ask the System Administrator for help.\n\n"; $pw2='differ'.$pw1; }
+        }
+
+        # Fehlermeldung ausgeben und die Schleife von vorne starten
+        if ($errorMsg ne '')
+        {
+            outputInfo('ERROR(s) with your password:'."\n".$errorMsg);
+            $passwordLoops++;
+            next;
+        }
+        
+        # falls manuelle Eingabe gewuenscht, erneute Eingabe zur Kontrolle
+        if ($password eq '')
+        {     
+            $pw2=inputHiddenText($passwordText2,'');        # Eingabe der zweiten Passwortes (zur Kontrolle)
+        }
+        
+        # Ausgabe des Passwortes im KLARTEXT fuers DEBUGGING
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+            outputInfo('CLEARTEXT PASSWORD 2: '.$pw2."\n");
+        }
+            
+        # Passwoerter auf Gleichheit pruefen
+        if ($pw1 ne $pw2) { $errorMsg.="- The passwords differ.\n"; }
+        
+
+        # Fehlermeldung ausgeben
+        if ($errorMsg ne '')
+        {
+            outputInfo('ERROR(s) with your password:'."\n".$errorMsg);  
+        }
+        
+        $passwordLoops++;
+
+    }
+        
+    return (createPasswordHashes($pw1),$pw1);
+}
+
+
+## Funktion: Diese Funktion berechtet die gewuenschten Passwort-Hashes aus dem Klartext-Passwort.
+sub createPasswordHashes
+{
+    my $cleartextPassword = shift;
+
+    my $sambaLMPasswordHash='';
+    my $sambaNTPasswordHash='';
+    my $unixPasswordHash='';
+    
+    #  wird das (Lan Mangager) LM-Passwort fuer SMB-Zugriffe bis Windows ME noch benoetigt
+    if ($disableSambaLMPassword eq 'y')
+    {
+        # ueberschreiben des unsicheren LM-Passwortes
+        $sambaLMPassword='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+    }
+    else
+    {
+        # das LM-Passwort auf Wunsch doch erstellen
+        $sambaLMPassword=createSambaLMPassword($cleartextPassword);
+    }
+    
+    # NT-Passwort erstellen
+    $sambaNTPasswordHash=createSambaNTPassword($cleartextPassword);
+    
+    # Unix-Passwort erstellen
+    if ($typeOfUnixPasswordHash eq 'crypt') {
+        $unixPasswordHash=createCryptPassword($cleartextPassword);
+    }
+    if ($typeOfUnixPasswordHash eq 'md5') {
+        $unixPasswordHash=createMd5Password($cleartextPassword);
+    }
+    if ($typeOfUnixPasswordHash eq 'smd5') {
+        $unixPasswordHash=createSmd5Password($cleartextPassword);
+    }
+    if ($typeOfUnixPasswordHash eq 'ssha512') {
+        $unixPasswordHash=createSsha512Password($cleartextPassword);
+    }
+        
+    return ($sambaLMPassword,$sambaNTPasswordHash,$unixPasswordHash);
+}
+
+
+
+## Funktion: Ein einfache Info an den Benutzer, die per "OK" bestaetigt werden muss.
+sub outputInfo {
+
+    my $outputMessage = shift;                  # auszugebender Text
+
+    if ($usedGui eq 'perl-print')
+    {
+        print "\n".$outputMessage."\n";
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # Textausgabe scrollbar + [OK]
+        system('dialog --backtitle "'.$windowTitle.'" --msgbox "'.$outputMessage.'" 0 0');
+    }
+
+    $tmpOutputMessage='';                       # temp. Ausgaben loeschen um doppelte Ausgaben zu verhindern
+}
+
+## Funktion: Ein einfache Ausgabe einer Datei
+sub outputFile {
+
+    my $outputFile = shift;                     # die auszugebende Datei
+
+    if ($usedGui eq 'perl-print')
+    {
+        print "\n";
+        system("cat $outputFile");
+        print "\n";
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # Textausgabe scrollbar + [OK]
+        system('dialog --backtitle "'.$windowTitle.' (TIP: Use the 4 arrows to scroll.)'.'" --textbox "'.$outputFile.'" 0 0');
+    }
+}
+
+## Funktion: Eine Info an den Benutzer UND ABBRECHEN des Programms -> Sinnvoll bei Fehlern
+sub outputAndDie
+{
+    my $outputMessage = shift;              # auszugebender Text VOR dem Ende
+    $windowTitle = 'ERROR: ';               # der letzte Fenstertitel vor Abbruch, sollte ruhig ERROR sein.
+
+    if ($usedGui eq 'perl-print')
+    {
+        print $windowTitle.$outputMessage." - The command stopped here.\n";
+        exit -1;
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # Textausgabe scrollbar + [OK]
+        system('dialog --backtitle "'.$windowTitle.'" --msgbox "'.$outputMessage.'" 0 0');
+        exit -1;
+    }
+
+    $tmpOutputMessage='';       # temp. Ausgaben loeschen um doppelte Ausgaben zu verhindern (aber da hier ein Abbruch passiert sollte dies eigentlich nie passieren)
+}
+
+## Zeilenweise Ausgabe einer datei als Menueauswahl. Rueckgabe ist Zeilennummer und Wert der Zeile.
+sub outputFileAsMenu
+{
+    my $menuMessage=shift;
+    my $listFile=shift;
+    my $toDelHead=shift;
+
+    # LDAP-Suche einlesen und Menue aufbereiten
+    my $lineCounter=1;                              # gibt die aktuelle Nummer des gueltigen Eintrags an
+    my $menuList='';                                # die MenueListe zur Auswahl des Eintrags
+    my @listOfLdapItems;                                # Liste der gefundenen LDAP-Eintraege
+    my @toLongLinesInMenu;
+
+    open (myOpenFile, '<'.$listFile) or outputAndDie("ERROR: Could nor read the file '$listFile'.");
+    while (<myOpenFile>)
+    {
+        chomp ($tmpData=$_);                            # Zeilenendezeichen entfernen aus Variablen
+        $tmpData =~ s/^$toDelHead//;                        # bestimmte fuehrenden Zeichenketten jeder Zeile entfernen (falls vorhanden)
+
+        if (((length($tmpData))>0)&&($tmpData!~/[ ]*[#]+.*/))           # zu kurze Zeilen oder Kommentarzeilen ignorieren
+        {
+            if ($usedGui eq 'perl-print') {
+                $menuList.=$lineCounter.' "'.$tmpData.'"'."\n";     # Menue-Zeile aufbauen fuer perl-print
+            }
+            if ($usedGui eq 'dialog') {
+                $menuList.=$lineCounter.' "'.$tmpData.'" ';     # Menue-Zeile aufbauen fuer dialog
+
+                if (length($tmpData)>$maxLengthMenuLine) {
+                    push @toLongLinesInMenu,$tmpData;       # merke Zeilen, die ZU LANG fuer das dialog-Menue sind
+                }
+            }
+            $lineCounter++;
+            push @listOfLdapItems,$tmpData;                 # Eintrag in Array schreiben
+        }
+    }
+    close myOpenFile;
+
+    if ($usedGui eq 'perl-print')
+    {
+         print "\n".$windowTitle."\n";                              # Ausgabe Titel
+        #$menuOutputList =~ s/   /\n/g;                             # Ausgabe-Menue umwandeln in zeilenweisen Ausgabetext
+        print "\n".$menuList."\nPlease choose a number (or exit with an empty input): ";                            # Menue ausgeben
+        chomp ($choise=(<STDIN>));                              # Eingabe holen und RETURN entfernen
+    }
+
+    if ($usedGui eq 'dialog')
+    {
+        # Warungen ausgeben bei ZU LANGEN Menue-Zeilen
+        if (scalar(@toLongLinesInMenu)>0) {
+            my $tmpOutputWarning="Warning: In the next dialog are too many lines. Maybe you run in problems with this.\n\n";
+            foreach $i (@toLongLinesInMenu) { $tmpOutputWarning.=$i."\n\n"; }           # zu lange Zeilen (korrekt) ausgeben
+            outputInfo $tmpOutputWarning;
+        }
+
+        # Ausgabe als Dialog-Menue
+        system "dialog --backtitle '$windowTitle' --title 'Choose ONE of the following lines or exit.' --menu '$menuMessage' 0 0 0 $menuList 2> $dialogTempFile";
+        $choise=`cat $dialogTempFile`;                      # Auswahl einlesen
+    }
+
+    # Auswahl testen und bei leerer Eingabe abbrechen
+    if (($choise < 1)||($choise >= $lineCounter)) { outputInfo("Stop now. Maybe your answer was wrong or you choose the exit.\n"); exit -1; }
+    if ($choise eq '') { outputInfo("Exit now.\n"); exit -1; }
+
+    return ($choise,$listOfLdapItems[$choise-1]);
+}
+
+
+
+## Eingabe-Menue fuer einen Dateinamen. Es wird entweder der vollstaendige Pfad zu einer Datei oder ein leerer String zurueckgegeben.
+sub selectFilename
+{
+    my $menuMessage=shift;                  # Meldung zum Ausgeben
+    my $menuTitle=shift;                    # Titel des Menues zum Ausgeben
+    my $setCurrentPath=shift;               # falls gesetzt, der einzusetzende Pfad
+    my $allowEmptyInput=shift;              # falls 'y', wird auch eine leere Eingabe (einfach ENTER) als gueltig erklaert
+
+    my $fileName;                       # Dateiname fuer Rueckgabe
+    my $fileNameIsCorrect='n';
+    my $currentPath=`pwd`;
+    chomp($currentPath);
+    $currentPath.='/';
+
+    if ($setCurrentPath ne '') { $currentPath=$setCurrentPath; }        # falls Wert uebergeben, aktuellen Pfad ueberschreiben
+
+    while ($fileNameIsCorrect ne 'y')
+    {
+        if ($usedGui eq 'dialog')
+        {
+
+            outputInfo($menuMessage."\n\nPlease check if the full path to the file is written in the botton line. Use the keys 'Tab', 'Space', '/', and the 'cursors' to choose the file and press enter.\n\n");
+
+            system "dialog --backtitle \"$menuTitle\" --fselect '".$currentPath."' 15 60 2> $dialogTempFile";
+            $fileName=`cat $dialogTempFile`;
+        }
+
+        if ($usedGui eq 'perl-print')
+        {
+            $tmpOutputMessage=$menuMessage."\n\nPlease write the full path to the file now: ";
+            $fileName=(inputText($tmpOutputMessage,$currentPath));
+        }
+
+        # falls nur ENTER gedrueckt
+        if (($allowEmptyInput eq 'y')&&(($fileName eq '')||($fileName eq $currentPath))) { return ''; }
+
+        # pruefe ob es sich um eine Datei handelt - falls ja, frage Benutzer ob Eingabe OK ist - falls nein neue Eingabe fordern
+        if ( -f $fileName )
+        {
+            $fileNameIsCorrect=yesNoQuestion("You choose the file '$fileName'.\nIs this the correct file ?",'y','n','y');
+        }
+        else
+        {
+            outputInfo("\n\nERROR: The file '$fileName' is not a correct file. Please try it again.\n\n");
+        }
+    }
+
+    return $fileName;
+}
+
+
+## Hilfsfunktion welche System-Kommandos startet System-Meldungen ausgibt und im Fehlerfall Wiederholungen erlaubt
+sub runShellCommandWithPassword
+{
+    my $outputMessage=shift;                # Meldung zum Ausgeben
+    my $commandLinesToRun=shift;                # auszufuehrendes Kommando
+    my $outputCommandFile=shift;                # Dateiname fuer die Ausgabe
+    my $runMessage='';                  # System-Meldung bei der Ausfuehrung
+    my $runCommand='y';                 # sobald nicht mehr 'y' Abbruch der Funktion
+    my $tmpLineNumber=0;
+
+    # falls keine Outputdatei angegeben, werfe die Ausgabe einfach in das Standard-Tempfile
+    if ($outputCommandFile eq '') { $outputCommandFile=$systemOutputTempFile; }
+
+    # durchlauf beis erfolgreich oder Abbruch gewaehlt
+    while ($runCommand eq 'y')
+    {
+        # Meldungen in eine Datei schreiben und ausgeben
+        open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not overwrite the file $dialogTempFile\n");
+        print myOpenFile $outputMessage."\n";
+        print myOpenFile "Please type the password to run the following command:\n\n";
+        print myOpenFile $commandLinesToRun;
+        print myOpenFile "\n\nAfter running you will see the output (stdout und stderr) of this command, here.";
+        close myOpenFile;
+        outputFile($dialogTempFile);
+
+        # Kommando ausfuehren und Ergebnisse auf STDOUT und in Datei ausgeben
+        system $commandLinesToRun." 2>&1 | tee ".$outputCommandFile;
+
+        # Ausgabe des Kommandos und Frage, ob es wiederholt werden sollte
+        outputFile($outputCommandFile);
+        $tmpOutputMessage="If there was an error here (like a wrong password) you can repeat the command, now.\n\nRepeat the last command, now ?";
+        $runCommand=yesNoQuestion($tmpOutputMessage,'y','n','n');
+    }
+
+    # Frage ob weitergemacht werden soll (falls Fehler aufgetreten sind, ist dies eine Moeglichkeit eines sauberen Abbruchs
+    $tmpContinue=yesNoQuestion("Should I STOP the script NOW, because there was a problem ?",'y','n','n'); 
+    if ( $tmpContinue ne 'n' ) { outputAndDie("The script was stopped now."); }
+}
+
+
+## zum starten von Kommandos wie ldapadd oder ldapmodify auf der Shell
+sub runLdapAdminShellCommandWithPassword
+{
+    my $outputMessage=shift;                                        # Meldung zum Ausgeben
+    my $commandLinesToRun=shift;                                        # auszufuehrendes Kommando
+    my $outputCommandFile=shift;                                        # Dateiname fuer die Ausgabe
+    my $runMessage='';                                          # System-Meldung bei der Ausfuehrung
+    my $runCommand='y';                                         # sobald nicht mehr 'y' Abbruch der Funktion
+    my $tmpLineNumber=0;
+    my $systemReturn=0;
+
+    # falls keine Outputdatei angegeben und keine Ausgabe in der Konsole erfolgen soll, werfe die Ausgabe einfach in das Standard-Tempfile
+    if (($outputCommandFile eq '')&&($usedGui ne 'perl-print')) { $outputCommandFile=$systemOutputTempFile; }
+    
+    # falls die Ausgabe in der Konsole erfolgen soll verwerfe sie, da dies schon das Kommando "tee" macht
+    if ($usedGui eq 'perl-print') { $outputCommandFile='/dev/null'; }
+
+    # teste ob es eine Passwortdatei fuer das LDAP-Admin-Bind gibt und diese lesbar ist
+    my $ldapAdminPasswordFileIsValid='n';
+    open (myOpenTempFile, '<'.$ldapAdminPasswordFile);
+    while (<myOpenTempFile>)
+    {
+        chomp $_;                                           # entferne evtl. Zeilenumbrueche
+        if ((length($_))>0)                                     # falls nun noch ein Inhalt groesser als 0 Byte in der Datei steht
+        {
+            $ldapAdminPasswordFileIsValid='y';                          # ... dann ist dieser Inhalt vermutlich das Kennwort
+            $commandLinesToRun.=' -y '.$ldapAdminPasswordFile;                  # haenge die Kommandozeilenoption an, die dass Passwort aus der Datei nutzen laesst         
+        } 
+    }
+    close (myOpenTempFile);
+    
+    # durchlauf beis erfolgreich oder Abbruch gewaehlt
+    while ($runCommand eq 'y')
+    {
+        if ($ldapAdminPasswordFileIsValid eq 'n')
+        {
+            # Meldungen in eine Datei schreiben und ausgeben
+            open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not overwrite the file $dialogTempFile\n");
+            print myOpenFile $outputMessage."\n";
+            print myOpenFile "Please type the password to run the following command:\n\n";
+            print myOpenFile $commandLinesToRun;
+            print myOpenFile "\n\nAfter running you will see the output (stdout und stderr) from the command.";
+            close myOpenFile;
+            outputFile($dialogTempFile);
+        }
+        else
+        {
+            # Meldungen in eine Datei schreiben und ausgeben
+            open (myOpenFile, '>'.$dialogTempFile) or outputAndDie("ERROR: Could not overwrite the file $dialogTempFile\n");
+            print myOpenFile "Starting the following command, now:\n\n";
+            print myOpenFile $commandLinesToRun;
+            print myOpenFile "\n\nAfter running you will see the output (stdout und stderr) from the command.\n";
+            print myOpenFile "\nIn case of an authentification error, modify or delete the LDAP password file: ".$ldapAdminPasswordFile."\n";
+            close myOpenFile;
+            outputFile($dialogTempFile);
+        }
+
+        # Kommando ausfuehren und Ergebnisse auf STDOUT und in Datei ausgeben
+        $systemReturn = system($commandLinesToRun." 2>&1 | tee ".$outputCommandFile);
+
+        # Ausgabe des Kommandos
+        outputFile($outputCommandFile);
+        
+        if ($ldapAdminPasswordFileIsValid eq 'n')
+        {
+            # Frage, ob das Kommando wiederholt werden sollte, falls keine Kennwortdatei genutzt wurde
+            $tmpOutputMessage="If you used a wrong password you can repeat the last command, now.\n\nRepeat the last command, now ?";
+            $runCommand=yesNoQuestion($tmpOutputMessage,'y','n','n');
+        }
+        else
+        {
+            # falls das Passwort nicht manuell eingegeben wurde, gehe davon aus, dass es geklappt hat
+            $runCommand='n';
+        }
+    }
+
+    # Im DEBUG-Fall: Frage erst einmal ob weitergemacht werden soll. Dies ermoeglicht die LDIF-Datei einzusehen oder danach zu stoppen.
+    if ($namendParameters{"--debug"} eq 'SET')
+    { 
+        $tmpContinue=yesNoQuestion("Should I STOP the script NOW, because there was a problem ?",'y','n','n'); 
+        if ( $tmpContinue ne 'n' ) { outputAndDie("The script was stopped now."); }
+    }
+    
+    # Ende und Rueckgabe des Return-Codes der System-Funktion
+    return $systemReturn;
+}
+
+
+## Funktion, welche die Uid, UidNumber und SambaSIDs der Benutzer im LDAP und aus /etc/passwd ermittelt und in die "globalen" Arrays schreibt -> EINSATZ ist in create_userfiles geplant
+sub readSystemIDs
+{
+
+    ## Liste von vorhanden LDAP-Benutzen einlesen in hash_LDAP[][]
+
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo("Start a session to the LDAP server to read user data, read configurations ...\n"); }
+
+        our @listUsedUid;                                       # dieses Array enthaellt die Loginnamen, die benutzt oder gesperrt sind
+        our @listUsedUidNumber;                                     # dieses Array enthaellt die IDs (int) der Loginnamen, die benutzt oder gesperrt sind
+        our @listUsedSambaSID;                                      # dieses Array enthaellt die SIDs der Samba-Accounts, die benutzt oder gesperrt sind
+        our @listUsedGid;                                       # dieses Array enthaellt die Gruppennamen, die benutzt oder gesperrt sind
+        our @listUsedGidNumber;                                     # dieses Array enthaellt die IDs (int) der Gruppen, die benutzt oder gesperrt sind
+        
+        # SUCHE NACH uid, uidNumber und sambaSID in USERS-Zweig
+        $ldap = Net::LDAP->new($ldapServer) or outputAndDie("Fehler: $@");              # Verbindung zu LDAP-Server def.
+        $mesg = $ldap->bind;                                        # anonyme Verbindung herstellen
+        $mesg = $ldap->search(base => $ldapUserBase,filter => "(objectClass=posixAccount)",         # die Angabe eines Filters ist fuer 'attrs' (Datenauswahl) noetig
+            attrs => ['uid','uidNumber','sambaSID']);                       # im ldap suchen und nur bestimmte Werte pro Datensatz holen
+        $mesg->code && outputAndDie("[LDAP] ".$mesg->error);                            # Suche starten oder Fehler ausgeben
+        foreach $entry ($mesg->entries) {                               # Ausgabe aller Ergebnisse
+            push @listUsedUid,$entry->get_value('uid');                     # den Wert in die Liste eintragen (fuer spaetere Tests)
+            push @listUsedUidNumber,$entry->get_value('uidNumber');                 # den Wert in die Liste eintragen (fuer spaetere Tests)
+            $startLastSIDPart = rindex ($entry->get_value('sambaSID'),'-');             # Position des letzen Striches (danach kommt der Benutzerteil der SID)
+            $sambaUserSIDPart = substr ($entry->get_value('sambaSID'),($startLastSIDPart)+1);   # den Benutzerteil der SambaSID speichern (der Rest ist serverspeziefisch)
+            push @listUsedSambaSID,$sambaUserSIDPart;                       # den Wert in die Liste eintragen (fuer spaetere Tests)
+        }
+        $mesg = $ldap->unbind;                                      # Verbindung beenden
+
+        # SUCHE NACH uid, uidNumber und sambaSID in COMPUTERS-Zweig
+        $ldap = Net::LDAP->new($ldapServer) or outputAndDie("Fehler: $@");              # Verbindung zu LDAP-Server def.
+        $mesg = $ldap->bind;                                        # anonyme Verbindung herstellen
+        $mesg = $ldap->search(base => $ldapMachineBase,filter => "(objectClass=posixAccount)",      # die Angabe eines Filters ist fuer 'attrs' (Datenauswahl) noetig
+            attrs => ['uid','uidNumber','sambaSID']);                       # im ldap suchen und nur bestimmte Werte pro Datensatz holen
+        $mesg->code && outputAndDie("[LDAP] ".$mesg->error);                            # Suche starten oder Fehler ausgeben
+        foreach $entry ($mesg->entries) {                               # Ausgabe aller Ergebnisse
+            push @listUsedUid,$entry->get_value('uid');                     # den Wert in die Liste eintragen (fuer spaetere Tests)
+            push @listUsedUidNumber,$entry->get_value('uidNumber');                 # den Wert in die Liste eintragen (fuer spaetere Tests)
+            $startLastSIDPart = rindex ($entry->get_value('sambaSID'),'-');             # Position des letzen Striches (danach kommt der Benutzerteil der SID)
+            $sambaUserSIDPart = substr ($entry->get_value('sambaSID'),($startLastSIDPart)+1);   # den Benutzerteil der SambaSID speichern (der Rest ist serverspeziefisch)
+            push @listUsedSambaSID,$sambaUserSIDPart;                       # den Wert in die Liste eintragen (fuer spaetere Tests)
+        }
+        $mesg = $ldap->unbind;                                      # Verbindung beenden
+
+        # SUCHE NACH sambaSID, gidNumber und cn in GROUP-Zweig
+        $ldap = Net::LDAP->new($ldapServer) or outputAndDie("Fehler: $@");              # Verbindung zu LDAP-Server def.
+        $mesg = $ldap->bind;                                        # anonyme Verbindung herstellen
+        $mesg = $ldap->search(base => $ldapGroupBase,filter => "(objectClass=posixGroup)",      # die Angabe eines Filters ist fuer 'attrs' (Datenauswahl) noetig
+            attrs => ['sambaSID','gidNumber','cn']);                        # im ldap suchen und nur bestimmte Werte pro Datensatz holen
+        $mesg->code && outputAndDie("[LDAP] ".$mesg->error);                            # Suche starten oder Fehler ausgeben
+        foreach $entry ($mesg->entries) {                               # Ausgabe aller Ergebnisse
+            $startLastSIDPart = rindex ($entry->get_value('sambaSID'),'-');             # Position des letzen Striches (danach kommt der Benutzerteil der SID)
+            $sambaUserSIDPart = substr ($entry->get_value('sambaSID'),($startLastSIDPart)+1);   # den Benutzerteil der SambaSID speichern (der Rest ist serverspeziefisch)
+            push @listUsedSambaSID,$sambaUserSIDPart;                       # den Wert in die Liste eintragen (fuer spaetere Tests)
+            push @listUsedGidNumber,$entry->get_value('gidNumber');                 # den Wert in die Liste eintragen (fuer spaetere Tests)
+            push @listUsedGid,$entry->get_value('cn');                      # den Wert in die Liste eintragen (fuer spaetere Tests)
+        }
+        $mesg = $ldap->unbind;                                      # Verbindung beenden
+
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+            $tmpOutputMessage.="The session to the LDAP server was finished.\n";
+            $tmpOutputMessage.="Found ".scalar(@listUsedUid)." UIDs in the LDAP base.\n";
+            $tmpOutputMessage.="Found ".scalar(@listUsedGid)." GIDs in the LDAP base.\n";
+            $tmpOutputMessage.="Found ".scalar(@listUsedSambaSID)." used Samba IDs in the LDAP base.\n\n";
+            $tmpOutputMessage.="Read now the files /etc/passwd and /etc/group .\n";
+        }
+
+    ## Liste von LOKALEN Benutzern des LDAP-SERVERS aus /etc/passwd einlesen
+
+        open (myOpenFile, '</etc/passwd') or outputAndDie($tmpOutputMessage."ERROR: Could not read the file /etc/passwd .");
+        $numberLocalUsers=0;                                        # Anzahl localer Benutzer aus /etc/passwd
+        while (<myOpenFile>)
+        {
+            chomp $_;                                       # Zeilenendezeichen entfernen aus Variable
+            if ((length($_))>2) {                                   # zu kurze Zeilen ignorieren
+                @nameParts = split /[:]+/,$_;                           # jede Zeile in Bestandteile zerlegen
+                $numberLocalUsers++;
+                push @listUsedUid,$nameParts[0];                        # localen Loginnamen zum LDAP-ARRAY hinzufuegen
+                push @listUsedUidNumber,$nameParts[2];                      # locale Unix-UID zum LDAP-ARRAY hinzufuegen
+            }
+        }
+        close myOpenFile;
+        if ($namendParameters{"--debug"} eq 'SET') { $tmpOutputMessage.="Found $numberLocalUsers local (system) accounts.\n"; }
+
+        
+    ## Liste von LOKALEN Gruppen des LDAP-SERVERS aus /etc/group einlesen
+
+        open (myOpenFile, '</etc/group') or outputAndDie($tmpOutputMessage."ERROR: Could not read the file /etc/group .");
+        $numberLocalGroups=0;                                       # Anzahl lokaler Gruppen aus /etc/group
+        while (<myOpenFile>)
+        {
+            chomp $_;                                       # Zeilenendezeichen entfernen aus Variable
+            if ((length($_))>2) {                                   # zu kurze Zeilen ignorieren
+                @nameParts = split /[:]+/,$_;                           # jede Zeile in Bestandteile zerlegen
+                $numberLocalGroups++;
+                push @listUsedGid,$nameParts[0];                        # lokalen Gruppennamen zum LDAP-ARRAY hinzufuegen
+                push @listUsedGidNumber,$nameParts[2];                      # lokale Gruppen-UID zum LDAP-ARRAY hinzufuegen
+            }
+        }
+        close myOpenFile;
+        if ($namendParameters{"--debug"} eq 'SET') { $tmpOutputMessage.="Found $numberLocalGroups local groups.\n"; }
+        
+
+    ## Liste NICHT erlaubter Benutzer einlesen (sinnvoll z.B. wenn man fuer diesen Namen einen E-Mail-Allias "root@..." hat)
+
+        open (myOpenFile, $deniedLoginNames) or outputAndDie($tmpOutputMessage."ERROR: Could not read the file $deniedLoginNames .");
+        $numberLocalUsers=0;                                        # Anzahl Benutzer aus $deniedLoginNames
+        while (<myOpenFile>)
+        {
+            chomp $_;                                       # Zeilenendezeichen entfernen aus Variable
+            if ((length($_))>0) {                                   # zu leere Zeilen ignorieren
+                $numberLocalUsers++;
+                push @listUsedUid,$_;                               # Loginnamen zum LDAP-ARRAY hinzufuegen
+            }
+        }
+        close myOpenFile;
+        if ($namendParameters{"--debug"} eq 'SET') { $tmpOutputMessage.="\nFound $numberLocalUsers not denied login names.\n"; }
+
+        # AUSGABE der gefundenen Daten (im LDAP und /etc/passwd)
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo ($tmpOutputMessage); }
+
+    ## lese Liste verbotene IDNumbers ein
+
+        # falls es gewuenscht ist ...
+        if ($rememberAndCheckOldIds eq 'y') 
+        {
+            # lese Liste der verbotenen UIDNumbers ein (das sind Benutzer-IDs, welche bereits im Einsatz sind ODER im Einsatz waren)
+            open (myOpenFile, '<'.$fileDeniedUidNumbers) or outputAndDie($tmpOutputMessage."ERROR: Could not read the file '".$fileDeniedUidNumbers."'.");
+            while (<myOpenFile>) { 
+                chomp $_; 
+                if ((length($_))>0) { push @listUsedUidNumber,$_; }             # fuege verbotene Benutzer-IDs dem array hinzu
+            }
+            close myOpenFile;
+
+            # lese Liste der verbotenen SambaIDs ein (das sind SIDs, welche bereits im Einsatz sind ODER im Einsatz waren)
+            open (myOpenFile, '<'.$fileDeniedSambaUID) or outputAndDie($tmpOutputMessage."ERROR: Could not read the file '".$fileDeniedSambaUID."'.");
+            while (<myOpenFile>) { 
+                chomp $_; 
+                if ((length($_))>0) { push @listUsedSambaSID,$_; }              # fuege verbotene Samba-IDs dem Array hinzu
+            }
+            close myOpenFile;
+        }
+}
+
+
+## Funktion: teste die UID (den Loginname) und aendere ihn ggf. ab
+sub testUid
+{
+        my $uid = shift;                                # die gewuensche uid aus dem Parameter holen
+
+        # teste und wandle nach gueltigen Zeichen im Login
+        $uid = testSimpleChars($uid,'login');                       # die Zeichen aus Login testen
+        $uid = lc $uid;                                 # in Kleinbuchstaben wandeln
+        $uid = substr $uid,0,$maxLengthLoginName;                   # Login auf max. Zeichen begrenzen
+
+        # teste ob das Login schon verwendet wird
+        my $tempUid=testUsedValues($uid,'login',\@listUsedUid);
+        
+        # Rueckgabe oder rekursiver Aufruf
+        if ($uid eq $tempUid) { return($uid); }                     # dieses Login ist nun OK und die Funktion ist hiermit beendet
+        else { return (testUid($tempUid)); }                        # das bei der Korrektur (von testUsedValues()) eingegebene Login muss ggf. wieder korrigiert werden (z.B. die Laenge)
+}
+
+
+## Funktion: teste die GID (den Gruppen) und aendere ihn ggf. ab
+sub testGid
+{
+        my $gid = shift;                                # die gewuensche gid aus dem Parameter holen
+
+        # teste und wandle nach gueltigen Zeichen im Gruppennamen
+        $gid = testSimpleChars($gid,'group');                       # die Zeichen aus dem Gruppennamen testen
+        $gid = lc $gid;                                 # in Kleinbuchstaben wandeln
+        $gid = substr $gid,0,$maxLengthGroupName;                   # den Gruppennamen auf max. Zeichen begrenzen
+
+        # teste ob der Gruppenname schon verwendet wird
+        my $tempGid=testUsedValues($gid,'group',\@listUsedGid);
+        
+        # Rueckgabe oder rekursiver Aufruf
+        if ($gid eq $tempGid) { return($gid); }                     # dieser Gruppenname ist nun OK und die Funktion ist hiermit beendet
+        else { return (testGid($tempGid)); }                        # der bei der Korrektur (von testUsedValues()) eingegebene Gruppenname muss ggf. wieder korrigiert werden (z.B. die Laenge)
+}
+
+
+sub sortFile
+{
+        # Name der Datei die sortiert werden soll holen
+        my $fileName = shift;
+        my @lines;
+        
+        # Datei im ganzen in das Array einlesen
+        open (my $myOpenFile, '<'.$fileName) or outputAndDie($tmpOutputMessage."ERROR: Could not read the file '".$fileName."'.");
+        @lines=<$myOpenFile>;
+        close $myOpenFile;
+        
+        # Datei sortiert in die gleiche Datei neu (ueber-)schreiben
+        open ($myOpenFile, '>'.$fileName) or outputAndDie($tmpOutputMessage."ERROR: Could not write the file '".$fileName."'.");
+        foreach my $line (sort @lines){
+            print $myOpenFile $line;
+        }
+        close $myOpenFile;      
+}
+
+
+## diese Funktion erstellt fuer jeden Benutzer eine LDIF-DATEI
+sub createLdifFileForNewUsers
+{   
+    my $ldifFileNameWithFullPath=shift;                             # Name der LDIF Datei
+    my $numberUsers=shift;                                      # Anzahl anzulegender Benutzer
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: Creating the LDIF file '$ldifFileNameWithFullPath' for the new user(s), now.\n"); }
+
+    # LDIF-Ausgabe-Datei schreibend oeffnen
+    open neueDatei, '>'.$ldifFileNameWithFullPath or outputAndDie('ERROR: Could not create the ldif file: '.$ldifFileNameWithFullPath);
+
+    # den Kopf der LDIF-Datei erzeugen
+    print neueDatei $ldifAddHeader;
+
+    ### INFOS ARRAY ####
+    # (2D)-Array zur LDIF-Erstellung
+    # $newLogins[0][1] -> LOGIN OF USER
+    # $newLogins[0][2] -> Unix UID nummer
+    # $newLogins[0][3] -> Samba SID part for user
+    # $newLogins[0][4] -> first name of user
+    # $newLogins[0][5] -> surename of user
+    # $newLogins[0][6] -> full name
+    # $newLogins[0][7] -> email address
+    # $newLogins[0][8] -> quota for (own)cloud
+    # $newLogins[0][9] -> numbers of allowed parallel wireless clients (eduroam)
+    # $newLogins[0][10] -> UNIX-Passwort-HASH
+    # $newLogins[0][11] -> NT-Passwort-HASH
+    # $newLogins[0][12] -> LanManager-Passwort-Hash
+    # $newLogins[0][13] -> description
+    # $newLogins[0][14] -> homeDirectory
+    # $newLogins[0][15] -> the loginShell
+    
+    for ($i=0;$i<$numberUsers;$i++)
+    {
+        # LDIF Eintraege schreiben
+        print neueDatei "\n\n# USER: $newLogins[$i][6]\n#\n";
+        print neueDatei "dn: uid=$newLogins[$i][1],$ldapUserBase\n";        # das Login des Benutzes
+        print neueDatei "cn: $newLogins[$i][6]\n";                          # der vollstaendige Name
+        print neueDatei "displayName: $newLogins[$i][6]\n";                 # der vollstaendige Name fuer die Anzeige in Software wie ownCloud
+        print neueDatei "givenName: $newLogins[$i][4]\n";                   # Vorname
+        print neueDatei "sn: $newLogins[$i][5]\n";                          # Nachname
+        print neueDatei "uid: $newLogins[$i][1]\n";                         # UNIX-Login
+        print neueDatei "uidNumber: $newLogins[$i][2]\n";                   # die UNIX-UID
+        print neueDatei "gidNumber: $stdGidNumber\n";                       # Standardgruppe
+        print neueDatei 'homeDirectory: '.$newLogins[$i][14]."\n";          # Heimatverzeichnis
+        print neueDatei 'loginShell: '.$newLogins[$i][15]."\n";             # Standardshell
+        print neueDatei 'mail: '.$newLogins[$i][7]."\n";                    # E-Mail-Adresse
+        print neueDatei "objectClass: top\n";                               # Wurzel LDAP-Schema
+        print neueDatei "objectClass: posixAccount\n";                      # LDAP-Schema fuer Unix-Accounts
+        print neueDatei "objectClass: shadowAccount\n";                     # LDAP-Schema fuer Shadow-Pawoerter
+        print neueDatei "objectClass: inetOrgPerson\n";                     # LDAP-Schema fuer allgemeine Werte des Accounts wie Telefonnummer, Bild, ...
+        print neueDatei "objectClass: sambaSamAccount\n";                   # LDAP-Schema fuer Samba-Accounts
+        print neueDatei "objectClass: radiusprofile\n";                     # LDAP-Schema fuer (Free-)Radius-Accounts (WLAN)
+        print neueDatei "objectClass: extraAccountValues\n";                # LDAP-Schema fuer eigene Werte und die Quota bei der lokalen Cloud     
+        print neueDatei "sambaAcctFlags: [UX         ]\n";                  # Standardwert fuer alle User-Accounts (X -> "Konto laeuft nie ab"; U -> user account)
+        print neueDatei "userPassword: $newLogins[$i][10]\n";               # UNIX-Passwort     
+        print neueDatei "sambaNTPassword: $newLogins[$i][11]\n";            # ein Samba-Passwort (NT cleartextpwd)
+        print neueDatei "sambaLMPassword: $newLogins[$i][12]\n";            # ein Samba-Passwort (LanManager cleartextpwd) (WIRD OFT GELOESCHT)
+        print neueDatei "sambaPrimaryGroupSID: $sambaServerSID-$sambaPrimaryGroupSIDOffset\n";  # Samba-Gruppen-SID des Accounts
+        print neueDatei "sambaPwdCanChange: $sambaPwdCanChange\n";          # Anz. Sek. nach 1.1.1970 wann Samba-PWD geaendert werden kann
+        print neueDatei "sambaPwdLastSet: $sambaPwdLastSet\n";              # Anz. Sek. nach 1.1.1970 wann Samba-PWD geaendert wurde
+        print neueDatei "sambaPwdMustChange: $sambaPwdMustChange\n";        # Anz. Sek. nach 1.1.1970 wann Samba-PWD geaendert werden muss
+        print neueDatei "sambaSID: $sambaServerSID-$newLogins[$i][3]\n";    # Samba-SID des Benutzers
+        print neueDatei "shadowInactive: $shadowInactive\n";                # Anzahl Tage eines moegl. Logins nach PWD-Ablauf
+        print neueDatei "shadowLastChange: $shadowLastChange\n";            # Datum der Passwort-Erstellung
+        print neueDatei "shadowMax: $shadowMax\n";                          # Anzahl Tage die das Passwort gueltig ist
+        print neueDatei "shadowMin: $shadowMin\n";                          # Datum wann das Passwort geaendert werden kann
+        print neueDatei "shadowWarning: $shadowWarning\n";                  # Anzahl Tage fuer Warnungen bei Passwort-Ablauf
+        print neueDatei "accountValidUntil: ".((int($thisTime/24/3600))+$defaultValidDays)."\n";# Anzahl Tage der Default-Gueltigkeit eines Accounts (nur fuer eigene Testskripte gedacht)
+        print neueDatei "quotaCloudStorage: ".$newLogins[$i][8]."\n";       # Quota fuer die lokale Cloud z.B. "20 GB"
+        print neueDatei "radiusFramedMTU: $radiusFramedMTU\n";              # MTU fuer Datenverkehr (576 soll gut sein) im WLAN
+        print neueDatei "radiusIdleTimeout: $radiusIdleTimeout\n";          # Anzahl Sekunden des NICHT-SENDENS bis zum Logout (Timeout) im WLAN
+        print neueDatei "radiusSimultaneousUse: ".$newLogins[$i][9]."\n";   # Anzahl max. paralleler Logins im WLAN
+        print neueDatei "description: ".$newLogins[$i][13]."\n";            # eine Beschreibung zu diesem Account
+    }
+    
+    # LDIF-Ausgabe-Datei schliessen
+    close neueDatei;
+}
+
+
+## diese Funktion erstellt fuer jeden Benutzer eine LDIF-DATEI, nutzt ab keine Defaults fuer shell und Co.
+sub createLdifFileForUsersWithIndividualSettings
+{   
+    my $ldifFileNameWithFullPath=shift;                             # Name der LDIF Datei
+    my $numberUsers=shift;                                      # Anzahl anzulegender Benutzer
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: Creating the LDIF file '$ldifFileNameWithFullPath' for the new user(s), now.\n"); }
+
+    # LDIF-Ausgabe-Datei schreibend oeffnen
+    open neueDatei, '>'.$ldifFileNameWithFullPath or outputAndDie('ERROR: Could not create the ldif file: '.$ldifFileNameWithFullPath);
+
+    # den Kopf der LDIF-Datei erzeugen
+    print neueDatei $ldifAddHeader;
+
+    ### INFOS ARRAY ####
+    # (2D)-Array zur LDIF-Erstellung
+    # $newLogins[0][1] -> LOGIN OF USER
+    # $newLogins[0][2] -> Unix UID nummer
+    # $newLogins[0][3] -> Samba SID part for user
+    # $newLogins[0][4] -> first name of user
+    # $newLogins[0][5] -> surename of user
+    # $newLogins[0][6] -> full name
+    # $newLogins[0][7] -> email address
+    # $newLogins[0][8] -> quota for (own)cloud
+    # $newLogins[0][9] -> numbers of allowed parallel wireless clients (eduroam)
+    # $newLogins[0][10] -> UNIX-Passwort-HASH
+    # $newLogins[0][11] -> NT-Passwort-HASH
+    # $newLogins[0][12] -> LanManager-Passwort-Hash
+    
+    # $newLogins[0][13] -> displayName
+    # $newLogins[0][14] -> Heimatverzeichnis
+    # $newLogins[0][15] -> Login-Shell
+    # $newLogins[0][16] -> sambaPwdCanChange
+    # $newLogins[0][17] -> sambaPwdLastSet
+    # $newLogins[0][18] -> sambaPwdMustChange
+    # $newLogins[0][19] -> shadowInactive
+    # $newLogins[0][20] -> shadowLastChange
+    # $newLogins[0][21] -> shadowMax
+    # $newLogins[0][22] -> shadowMin
+    # $newLogins[0][23] -> shadowWarning
+    # $newLogins[0][24] -> sambaAcctFlags
+    # $newLogins[0][25] -> Standard-Gruppen-ID
+    # $newLogins[0][26] -> Samba-Gruppen-ID
+    
+    for ($i=0;$i<$numberUsers;$i++)
+    {
+        # LDIF Eintraege schreiben
+        print neueDatei "\n\n# USER: $newLogins[$i][6]\n#\n";
+        print neueDatei "dn: uid=$newLogins[$i][1],$ldapUserBase\n";                # das Login des Benutzes
+        print neueDatei "cn: $newLogins[$i][6]\n";                      # der vollstaendige Name
+        print neueDatei "displayName: $newLogins[$i][13]\n";                    # der vollstaendige Name fuer die Anzeige in Software wie ownCloud
+        print neueDatei "givenName: $newLogins[$i][4]\n";                   # Vorname
+        print neueDatei "sn: $newLogins[$i][5]\n";                      # Nachname
+        print neueDatei "uid: $newLogins[$i][1]\n";                     # UNIX-Login
+        print neueDatei "uidNumber: $newLogins[$i][2]\n";                   # die UNIX-UID
+        print neueDatei "gidNumber: $newLogins[$i][25]\n";                  # Standardgruppe
+        print neueDatei 'homeDirectory: '.$newLogins[$i][14]."\n";              # Heimatverzeichnis (voller pfad)
+        print neueDatei 'loginShell: '.$newLogins[$i][15]."\n";                 # Login-Shell
+        print neueDatei 'mail: '.$newLogins[$i][7]."\n";                    # E-Mail-Adresse
+        print neueDatei "objectClass: top\n";                           # Wurzel LDAP-Schema
+        print neueDatei "objectClass: posixAccount\n";                      # LDAP-Schema fuer Unix-Accounts
+        print neueDatei "objectClass: shadowAccount\n";                     # LDAP-Schema fuer Shadow-Pawoerter
+        print neueDatei "objectClass: inetOrgPerson\n";                     # LDAP-Schema fuer allgemeine Werte des Accounts wie Telefonnummer, Bild, ...
+        print neueDatei "objectClass: sambaSamAccount\n";                   # LDAP-Schema fuer Samba-Accounts
+        print neueDatei "objectClass: radiusprofile\n";                     # LDAP-Schema fuer (Free-)Radius-Accounts (WLAN)
+        print neueDatei "objectClass: extraAccountValues\n";                    # LDAP-Schema fuer eigene Werte und die Quota bei der lokalen Cloud     
+        print neueDatei "sambaAcctFlags: $newLogins[$i][24]\n";                 # Standardwert fuer alle User-Accounts (X -> "Konto laeuft nie ab"; U -> user account)
+        print neueDatei "userPassword: $newLogins[$i][10]\n";                   # UNIX-Passwort     
+        print neueDatei "sambaNTPassword: $newLogins[$i][11]\n";                # ein Samba-Passwort (NT cleartextpwd)
+        print neueDatei "sambaLMPassword: $newLogins[$i][12]\n";                # ein Samba-Passwort (LanManager cleartextpwd) (WIRD OFT GELOESCHT)
+        print neueDatei "sambaPrimaryGroupSID: $newLogins[$i][26]\n";               # SambaGruppenID
+        print neueDatei "sambaPwdCanChange: $newLogins[$i][16]\n";              # Anz. Sek. nach 1.1.1970 wann Samba-PWD geaendert werden kann
+        print neueDatei "sambaPwdLastSet: $newLogins[$i][17]\n";                # Anz. Sek. nach 1.1.1970 wann Samba-PWD geaendert wurde
+        print neueDatei "sambaPwdMustChange: $newLogins[$i][18]\n";             # Anz. Sek. nach 1.1.1970 wann Samba-PWD geaendert werden muss
+        print neueDatei "sambaSID: $newLogins[$i][3]\n";                    # Samba-SID des Benutzers
+        print neueDatei "shadowInactive: $newLogins[$i][19]\n";                 # Anzahl Tage eines moegl. Logins nach PWD-Ablauf
+        print neueDatei "shadowLastChange: $newLogins[$i][20]\n";               # Datum der Passwort-Erstellung
+        print neueDatei "shadowMax: $newLogins[$i][21]\n";                  # Anzahl Tage die das Passwort gueltig ist
+        print neueDatei "shadowMin: $newLogins[$i][22]\n";                  # Datum wann das Passwort geaendert werden kann
+        print neueDatei "shadowWarning: $newLogins[$i][23]\n";                  # Anzahl Tage fuer Warnungen bei Passwort-Ablauf
+        print neueDatei "accountValidUntil: ".((int($thisTime/24/3600))+$defaultValidDays)."\n";# Anzahl Tage der Default-Gueltigkeit eines Accounts (nur fuer eigene Testskripte gedacht)
+        print neueDatei "quotaCloudStorage: ".$newLogins[$i][8]."\n";               # Quota fuer die lokale Cloud z.B. "20 GB"
+        print neueDatei "radiusFramedMTU: $radiusFramedMTU\n";                  # MTU fuer Datenverkehr (576 soll gut sein) im WLAN
+        print neueDatei "radiusIdleTimeout: $radiusIdleTimeout\n";              # Anzahl Sekunden des NICHT-SENDENS bis zum Logout (Timeout) im WLAN
+        print neueDatei "radiusSimultaneousUse: ".$newLogins[$i][9]."\n";           # Anzahl max. paralleler Logins im WLAN
+    }
+    
+    # LDIF-Ausgabe-Datei schliessen
+    close neueDatei;
+}
+
+
+## erstellt eine LDIF-Datei die alle Benutzer in/aus einer vorhandene Gruppe eintraegt oder loescht
+sub createLdifFileToAddOrRemoveUsersfromGroups
+{
+    my $ldifFileNameWithFullPath=shift;                                 # Name der LDIF Datei
+    my $numberOfUsers=shift;                                        # Anzahl der Benutzer
+    my $numberOfGroups=shift;                                       # Anzahl der Gruppen fuer alle Benutzer
+    my $membersArrayRef = shift;                                        # Referenz des Arrays fuer mit den Logins der Gruppe
+    my $groupDNsArrayRef=shift;                                     # Referenz des Arrays mit allen DNs aller Gruppen
+    my $changeType=shift;                                           # 'delete' oder 'add'
+
+    # Zur Sicherheit noch den Typ der Aenderung pruefen
+    if (!(($changeType eq 'delete')||($changeType eq 'add'))) { outputAndDie('Wrong parameter $changeType used in function createLdifFileToAddOrRemoveUsersfromGroups.'); }
+    
+    # Debug-Infos (falls gewuenscht)
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: Creating the LDIF file '$ldifFileNameWithFullPath' to manage the group, now.\n"); }
+
+    # LDIF-Ausgabe-Datei schreibend oeffnen
+    open (ldifTempFile,'>'.$ldifFileNameWithFullPath) or outputAndDie('ERROR: Could not create the ldif file: '.$ldifFileNameWithFullPath);
+    
+    # den Kopf der LDIF-Datei erzeugen
+    print ldifTempFile $ldifAddHeader;
+
+    # fuer alle Gruppen
+    for ($g=0;$g<$numberOfGroups;$g++)
+    {
+        # lese alle aktuellen Logins aus der Gruppe aus
+        my $delimiterAfterEachLdapObject='';                                                # Trennzeichen bei mehreren LDAP-Knoten. Wenn es leer ist wird es ignoriert. Ansonsten mit Zeilenumbruch ausgegeben.
+        my @ldapSearchArray=('memberUid');                                              # nur die Login der Mitglieder der Liste im LDAP suchen
+        my @ldapFoundArray; 
+        ldapValueSearch($groupDNsArrayRef->[$g],\@ldapSearchArray,$delimiterAfterEachLdapObject,'y',\@ldapFoundArray,'','','','');  # starte eine anonyme Suchanfrage und hole alle Logis von Mitgliedern
+                
+        my $tempOutputToLdifFile='';                                                    # hier werden die memberUids eingetragen, die veraendert werden sollen
+                
+        # fuer alle Logins
+        for ($u=0;$u<$numberOfUsers;$u++)
+        {
+            $loginAlreadyExists='n';
+            
+            foreach my $foundLogin (@ldapFoundArray)
+            {       
+                if ($foundLogin eq $membersArrayRef->[$u])
+                {
+                    $loginAlreadyExists='y';
+                    if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: The user $membersArrayRef->[$u] still exists in the LDAP group $groupDNsArrayRef->[$g].\n"); }
+                }
+            }
+            
+            # nur falls der Nutzer NICHT in der Gruppe existiert, diesen fuer 'add' eintragen
+            if (($loginAlreadyExists eq 'n')&&($changeType eq 'add'))
+            {
+                $tempOutputToLdifFile.="memberUid: ".$membersArrayRef->[$u]."\n";                       # jeden Benutzer des Array aus der Referenz eintragen
+            }
+
+            # nur falls der Nutzer in der Gruppe existiert, diesen fuer 'delete' eintragen
+            if (($loginAlreadyExists eq 'y')&&($changeType eq 'delete'))
+            {
+                $tempOutputToLdifFile.="memberUid: ".$membersArrayRef->[$u]."\n";                       # jeden Benutzer des Array aus der Referenz eintragen
+            }
+        }
+        
+        # nur falls es ueberhaupt Logins gibt, fuer die die Gruppe geaendert werden soll
+        if ($tempOutputToLdifFile ne '')
+        {
+            if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: Writing LDIF part in '$ldifFileNameWithFullPath' to change the user(s) in the group '".$groupDNsArrayRef->[$g]."', now.\n"); }
+
+            # Aenderung fuer alle folgenden Nutzer definieren
+            print ldifTempFile "dn: ".$groupDNsArrayRef->[$g]."\n";
+            print ldifTempFile "changetype: modify\n";
+            print ldifTempFile $changeType.": memberUid\n";
+        
+            # und die Logins eintragen
+            print ldifTempFile $tempOutputToLdifFile;
+        }
+
+        # benoetigte Leerzeile im LDIF, falls weiter Gruppen folgen
+        if (($g+1)<$numberOfGroups) { print ldifTempFile "\n"; }
+    }
+
+    # LDIF-Ausgabe-Datei schliessen
+    close ldifTempFile;
+}
+
+
+## erstellt eine LDIF-Datei die Aenderungen vornimmt
+sub createLdifFileForChanges
+{
+    my @changeArray = @{$_[3]};                                 # 2D-Array mittels Referenz uebergeben (durch vorheriges shift wuerde die Uebergabe-Position erniedrigt)
+    my $ldifFileNameWithFullPath=shift;                             # Name der LDIF Datei
+    my $dnToChange=shift;                                       # die DN des Kontens der geaendert werden soll
+    my $fileMode=shift;                                     # falls 'append' wird diese Datei nicht neu geschrieben, sondern der Inhalt angehaengt
+    
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: Writing (fileMode=$fileMode) the LDIF file '$ldifFileNameWithFullPath' to make changes in LDAP.\n"); }
+
+    # LDIF-Ausgabe-Datei schreibend oeffnen
+    if ($fileMode eq 'append')
+    {
+        open (ldifTempFile,'>>'.$ldifFileNameWithFullPath) or outputAndDie('ERROR: Could not append content to the ldif file: '.$ldifFileNameWithFullPath);
+        if ( -s $ldifFileNameWithFullPath ) {
+            print ldifTempFile "\n";                            # falls schon Eintraege einer anderen DN vorhanden sind, muessen diese durch eine Leerzeile abgetrennt werden
+        }
+    }
+    else { open (ldifTempFile,'>'.$ldifFileNameWithFullPath) or outputAndDie('ERROR: Could not create the ldif file: '.$ldifFileNameWithFullPath); }
+    
+    # den Kopf der LDIF-Datei erzeugen
+    print ldifTempFile $ldifAddHeader;
+    
+    # Ausgabe-Datei erstellen (LDIF)
+    print ldifTempFile "dn: ".$dnToChange."\n";
+    print ldifTempFile "changetype: modify\n";
+    
+    # erstelle Zeilen fuer die Aenderungen
+    for my $x ( 0 .. $#changeArray )
+    {
+        print ldifTempFile 'replace: '.$changeArray[$x][0]."\n";                # Zeile soll am Ende in Summe z.B. so aussehen 'replace: loginShell''
+        print ldifTempFile $changeArray[$x][0].': '.$changeArray[$x][1]."\n";           # erstelle neue LDIF-Zeile wie z.B. 'loginShell: /bin/false'
+        if ($#changeArray > $x) { print ldifTempFile "-\n"; }
+    }
+    
+    # LDIF-Ausgabe-Datei schliessen
+    close ldifTempFile;
+}
+
+
+## erstelle die Heimatverzeichnise fuer den/die Benutzer
+sub createUserFiles
+{
+    my $numberUsers = shift;                                    # Anzahl anzulegender Benutzer
+    
+    # Test ob Muster-Heimatverzeichnis existiert
+    @infoPatternHomeDir = stat($patternHomeDir);                            # Array ist leer wenn Verzeichnis nicht existiert
+    if (scalar(@infoPatternHomeDir)==0)                             # Fehlerfall Muster-Heimatverzeichnis existiert NICHT
+    {
+        outputAndDie("ERROR: The default home directoy '$patternHomeDir' doesn't exist. Stop the script now.\nPlease fix that manually.\n");
+    }
+    
+    outputInfo("Check an create the home directory(s) now. This can take a while ...\n");
+    
+    # erstelle die Heimatverzeichnisse fuer alle Benutzer
+    for ($i=0;$i<$numberUsers;$i++)
+    {
+        my $loginName=$newLogins[$i][1];                                    # dieser Variablenname ist hier einfach nur leichter zu lesen als das Array
+        my $loginUID=$newLogins[$i][2];                                     # dieser Variablenname ist hier einfach nur leichter zu lesen als das Array
+        $homeDir=$stdHomeDir.$loginName;                                    # das Heimatverzeichnis des Nutzers
+
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+        	$tmpOutputMessage.="DEBUG: Try to create the home directory '".$homeDir."' as copy of '".$patternHomeDir."' for the UID '".$loginUID."' and the GID '".$stdGidNumber."' ans set chmod to '".$stdChmodHomeDir."'.\n";
+        }
+
+        if ($loginName ne $noLoginName)                                     # solange Login gewollt ist
+        {
+            # teste ob Heimatverzeichnis existiert
+            my @infoHomeDir = stat($homeDir);                               # Array ist leer wenn Verzeichnis nicht existiert, ansonsten hat es Infos dazu
+
+            if (scalar(@infoHomeDir)!=0)                                    # Fehlerfall Benutzer-Home schon da
+            {
+                # Fehlerausgabe wenn das Heimatverzeichnis schon existiert
+                $tmpOutputMessage.="ERROR: The home directory '".$homeDir."' still exist. Please fix the home directory manually.\n";
+            }
+            else
+            {
+                # erstelle die Heimatverzeichnisse
+                system "cp -r $patternHomeDir $homeDir";                        # PROTOTYP fuer Home nutzen (/etc/skel-ART)
+                system "chown -R $loginUID $homeDir";                           # Eigentuemer als ID setzen (der Login-NAME waere oft erst nach dem Neuladen des NSCD aktuell)
+                system "chgrp -R $stdGidNumber $homeDir";                       # Gruppe setzen
+                system "chmod $stdChmodHomeDir $homeDir";                       # Standard-Rechte fuer HOME anwenden        
+                $tmpOutputMessage.="INFO: The new home directory '".$homeDir."' was created.\n";    # Info an den Admin
+            }
+        }
+    }
+    
+    outputInfo($tmpOutputMessage);
+}
+
+
+## gibt in einer Text-Datei alle Zeilen zwischen einem definierten START-String und END-String zurueck (optional kann definiert werden ob der Start-String mit ausgegeben werden soll und ob mehrfach-Funde auch ausgegeben werden sollen)
+sub grepTextFile
+{
+    my $nameOfFile = shift;                                             # Name der Datei die den Text enthaellt
+    my $startLine = shift;                                              # Zeichenkette die die Startposition angibt, von der ab gelesen werden soll
+    my $endLine = shift;                                                # Zeichenkette die angibt, dass nicht weiter gelesen werden soll
+    my $multiParts = shift;                                             # falls 'y' wird bei mehrfacher Vorkommen von '$startLine' diese auch mehrfach angehaengt
+    my $writeStartLine = shift;                                         # falls 'y' gib auch die Zeile mit der '$startLine' mit zurueck
+    
+    my $foundPart='n';
+    my $numberOfFound=0;
+    my $returnMessage='';
+    
+    open (myInputFile, '<'.$nameOfFile) or outputAndDie("ERROR: Could not open file: $nameOfFile \n");      # lesen der Datei beginnen
+    while (<myInputFile>)                                               # durchlaufe alle Zeilen der Datei
+    {
+        chomp $_;                                               # Zeilenumbruch entfernen
+        
+        if ($_ eq $startLine) { $foundPart='y'; $numberOfFound++; }                     # Zeichenkette die den START des Abschnittes angibt gefunden
+        if ($_ eq $endLine) { $foundPart='n'; }                                 # Zeichenkette die das ENDE des Abschnittes angibt gefunden
+        
+        if ($foundPart eq 'y')                                          # falls wir im gesuchten Abschnitt sind
+        {
+            if (($multiParts eq 'y')||($numberOfFound==1))                          # falls mehrfache Funde in einer Datei gewuenscht sind ODER dies der erste Fund war
+            {
+                if (($_ eq $startLine)&&($writeStartLine eq 'y')) { $returnMessage.=$_."\n"; }      # SONDERFALL START-Zeile: falls die aktuelle Zeile auch die START-Zeile ist und diese ausgeben AUCH werden soll, gib sie zurueck
+                if ($_ ne $startLine) { $returnMessage.=$_."\n"; }                  # falls es nicht gerade die START-Zeile ist gib diese Zeile zurueck         
+            }
+            
+        }
+    }
+    close myInputFile;                                              # Datei wieder beenden
+    
+    return $returnMessage;
+}
+
+
+## gibt die komplette DN (eines uebergebenen Eintrags (Login-, Gruppen-, oder Maschinen- Name) ODER einer Auswahl aus den vorhandenen DNs) zurueck
+sub chooseOrTestLdapItem
+{
+    my $ldapViewBase=shift;
+    my $givenItem=shift;
+    my $offsetOfItemType=shift;
+    
+    my $choise='';
+    
+    # Benutze- Gruppen oder Maschinen-NAME aus dem Parameter holen und pruefen
+    if ($givenItem ne '')
+    {   
+            my $ldapSearchBase=$offsetOfItemType.'='.$givenItem.','.$ldapViewBase;                                  # LDAP-Knoten der durchsucht bzw. gesucht werden soll
+            (my $errorMessage,my $numbersOfVaulues,my @ldapFoundArray)=getSimpleLdapValue($ldapSearchBase,'dn');                    # starte die Suchanfrage und teste ob es eine 'dn' gibt und gib diese zurueck
+                    
+            # falls $numbersOfVaulues groesser als 0 wurde der Benutzer gefunden
+            if ($numbersOfVaulues > 0) {
+                $choise=$ldapFoundArray[0];                                                     # merke den kompletten LDAP-Pfad (die 'dn') des Eintrags fuer das spaetere Loeschen
+            }
+            
+            # falls nicht, existiert der Benutzername nicht im LDAP -> Abbruch
+            else {
+                outputAndDie("The Ldap ITEM '".$givenItem."' DOESN'T EXISTS on the LDAP server.\n");                            # Fehlerfall, der im Parameter angegeben Login-Name existiert gar nicht im LDAP
+            }
+        }
+
+        # Benutze- Gruppen oder Maschinen-NAME aus Liste auswaehlen
+        else
+        {
+            # LDAP-Suche starten und GEFILTERTE Ausgabe in Datei schreiben
+            my @ldapSearchArray=('dn'); my @ldapFoundArray=();
+            ldapValueSearch($ldapViewBase,\@ldapSearchArray,'','y',\@ldapFoundArray,$systemOutputTempFile,'','','');                    # holt alle passenden Eintraege aus dem LDAP
+            
+            # LDAP-Ergebnisse (in der Rueckgabe-Datei) sortieren (leider kann nicht jede LDAP-Rueckgabe per Default sortiert werden)
+            sortFile($systemOutputTempFile);                                                        # Eintraege sortieren
+    
+            # Ausgabe der LDAP-Daten als Menue (dabei den parent-DN-Eintrag (z.B.: $ldapUserBase) NICHT mit ausgeben)
+            ($lineNumber,$choise)=outputFileAsMenu('Please choose the item to delete on the LDAP server:',$systemOutputTempFile,$ldapViewBase);     # Eintraege anzeigen und Auswahl zum Loeschen anbieten
+        
+            # temp. Datei wieder loeschen
+            unlink $systemOutputTempFile;
+
+        # Debug-Info ausgeben
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG: You have chosen the DN '".$choise."'.\n"); }
+        }
+
+    return $choise;
+}
+
+
+#####################################################################################################################
+
+#
+# AKTUELL NICHT IN perlLdapAccountScripts BENOETIGE FUNKTION:
+#
+
+    ## Eingabe-Menue fuer einen Verzeichnisnamen. Es wird entweder der vollstaendige Pfad zu einem Verzeichnis oder ein leerer String zurueckgegeben. (ANALOG zu selectFilename)
+    sub selectDirectory
+    {
+        my $menuMessage=shift;                  # Meldung zum Ausgeben
+        my $menuTitle=shift;                    # Titel des Menues zum Ausgeben
+        my $setCurrentPath=shift;               # falls gesetzt, der einzusetzende Pfad
+        my $allowEmptyInput=shift;              # falls 'y', wird auch eine leere Eingabe (einfach ENTER) als gueltig erklaert
+    
+        my $dirName;                        # Verzeichnisname fuer Rueckgabe
+        my $dirNameIsCorrect='n';
+        my $currentPath=`pwd`;
+        chomp($currentPath);
+        $currentPath.='/';
+    
+        if ($setCurrentPath ne '') { $currentPath=$setCurrentPath; }        # falls Wert uebergeben, aktuellen Pfad ueberschreiben
+    
+        while ($dirNameIsCorrect ne 'y')
+        {
+            if ($usedGui eq 'dialog')
+            {
+    
+                outputInfo($menuMessage."\n\nPlease note: On the next 'page' the full path to the directory must be written in the last line.\n\nUse the arrows and the keys 'Space', 'Tab' and '/' to choose. On the end press 'Enter' to finish your path.\n\n");
+    
+                system "dialog --backtitle \"$menuTitle\" --fselect '".$currentPath."' 0 0 2> $dialogTempFile";
+                $dirName=`cat $dialogTempFile`;
+            }
+    
+            if ($usedGui eq 'perl-print')
+            {
+                $tmpOutputMessage=$menuMessage."\n\nPlease type the relative path to your directory (currect directory: '".$currentPath."'): ";
+                $dirName=$currentPath.(inputText($tmpOutputMessage,`pwd`));
+            }
+    
+            # falls nur ENTER gedrueckt
+            if (($allowEmptyInput eq 'y')&&(($dirName eq '')||($dirName eq $currentPath))) { return ''; }
+    
+            # pruefe ob es sich um ein Verzeichnis handelt - falls ja, frage Benutzer ob Eingabe OK ist - falls nein neue Eingabe fordern
+            if (( -d $dirName )&&($dirName ne $currentPath))
+            {
+                $dirNameIsCorrect=yesNoQuestion("The directory '$dirName' was choosed.\nIs this correct (press 'n' to change it again) ? ",'y','n','y');
+            }
+            else
+            {
+                outputInfo("\n\n*** The choosed directory '$dirName' is not a valid directory. Please try it again. ***\n\n");
+            }
+        }
+    
+        return $dirName;
+    }
+
+#####################################################################################################################
+
+
+1; # beende den INCLUDE der Datei mit einer sauberen Rueckgabe (noetig fuer "require DATEI;" )

@@ -1,0 +1,140 @@
+#!/usr/bin/perl
+#
+# the configuration file of the perlLdapAccountScripts
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+# Konventionen:
+# - Datei-/Verzeichnis- Namen in englisch
+# - alle Verzeichnisse werden HIER mit abschliessenden '/' angegeben
+
+
+    # NUR deklarierte Variable erlauben. Dies dient der eigenen Sicherheit vor mehrfach definierten Variablen.
+    use strict;
+
+    # Warnungen ausgeben soweit wie moeglich (nur teilweise sinnvoll)
+    use warnings;
+
+    #
+    # WICHTIGE ANZUPASSENDE WERTE JE NACH CLUSTER
+    #
+
+    our $ldapServer = 'ldap.example.org';                                    			# der LDAP-SERVER, der zum Lesen und Schreiben verwendet werden soll
+    our $ldapAdminBind = 'cn=ldaproot,dc=example,dc=org';                 				# der LDAP-Bind (zur Authentifizierung)
+    our $ldapBase = 'dc=example,dc=org';                      							# der Pfad zur BASE-RDN
+    our $rememberAndCheckOldIds = 'n';                                                  # wenn 'y' werden die eingesetzten Unix- Benutzer + Gruppen sowie die Samba-IDs in Dateien vermerkt und der spaetere Einsatz verboten
+    our $sambaServerSID = 'S-1-5-21-1234567890-1234567890-123456789';                   # die SID des Samba-Servers (als ROOT: "net getlocalsid WINS-SERVERNAME")
+
+    #
+    # Die nachfolgenden Parameter sind fuer die perlLdapAccountScripts-Skripte sehr wichtig.
+    # Nur mit grosser Vorsicht sollte man die Positionen der Parameter tauschen, da es hier auch untereinander Abhaengigkeiten gibt.
+    #
+
+    # aktuelle Zeit als Unix-Timestamp und lessbare Zeit
+    our $thisTime = time();                                                             # aktuelle Zeit als Unix-Timestamp - WICHTIG AUCH FUER UNTERE PARAMETER
+    our @datearray = localtime($thisTime);                                              # Array mit Datumswerten
+    our $datestring = ($datearray[5]+1900).'-'.($datearray[4]+1).'-'.$datearray[3].'_-_'.$datearray[2].'.'.$datearray[1].'.'.$datearray[0];  # String mit Datum und Zeit
+
+    # LDAP-Server-Einstellungen
+    our $ldapUserBase = 'ou=users,'.$ldapBase;                                          # der Pfad zur Benutzer-RDN
+    our $ldapGroupBase = 'ou=groups,'.$ldapBase;                                        # der Pfad zur Gruppen-RDN
+    our $ldapMachineBase='ou=computers,'.$ldapBase;                                     # der Pfad zur Computeraccounts-RDN
+
+    # Einstellungen Werte fuer Accounts und Gruppen
+    our $firstSambaUID = 10000;                                                         # die erste moegliche Samba-UID die genutzt werden koennte
+    our $firstUidNumber = 10000;                                                        # die erste moegliche Unix-UID die genutzt werden koennte
+    our $firstGidNumber = 10000;                                                        # die erste moegliche Unix-GID die genutzt werden koennte
+    our $lastSambaUID = 59999;                                                          # die letzte moegliche Samba-UID die genutzt werden koennte
+    our $lastUidNumber = 59999;                                                         # die letzte moegliche Unix-UID die genutzt werden koennte
+    our $lastGidNumber = 59999;                                                         # die letzte moegliche Unix-GID die genutzt werden koennte
+    our $stdGidNumber = '100';                                                          # Standard-GruppenID fuer Benutzer
+    our $gidNumberOfDomainUsersGroup = '100';                                           # die Gruppe mit dieser GID wird der SID 513 fuer die "Domain Users" zugeordnet (sinnvollerweise die $stdGidNumber)
+    our $stdMachineGidNumber = '515';                                                   # Standard-GruppenID fuer Maschinen-Accounts ( 515 -> "Domain Computers" )
+    our $sambaPrimaryGroupSIDOffset = '513';                                            # Samba-GruppenID-OFFSET zur sambaServerSID ( 513 -> "Domain Users" )
+    our $stdHomeDir = '/home/';                                                         # Ort der Heimatverzeichnisse
+    our $stdLoginShell = '/bin/bash';                                                   # Standard-Shell
+    our $stdChmodHomeDir = '700';                                                       # dieser Wert setzt die Zugriffsrechte auf das Heimatverzeichnis
+    our $maxLengthLoginName = 500;                                                      # Maximallaenge fuer Login-Namen (Der Rest wird abgeschnitten !!!)
+    our $maxLengthGroupName = 500;                                                      # Maximallaenge fuer Gruppen-Namen (Der Rest wird abgeschnitten !!!)
+    our $minLengthPassword = 8;                                                         # Mindestlaenge fuer Benutzerpasswoerter
+    our $maxLengthPassword = 15;                                                        # Maximallaenge fuer Benutzerpasswoerter
+    our $passwordQuality = 5;                                                           # definiert die noetige Qualitaet manuell eingegeben Passoerter in der Funktion inputPassword() (falls Wert dort uebergeben wird)
+    our $conferencePwLen = 8;                                                           # vorgegebene, feste Laenge fuer Passwoerter fuer Konferenz-Accounts
+    our $typeOfUnixPasswordHash = 'ssha512';                                            # die Art des Unix-Passwort-Hashes die genutzt werden soll (siehe createPasswordHashes() in der Datei functions)
+    our $defaultQuotaCloudSpace = '50G';                                                # Default-Wert fuer den Speicherplatz in der Cloud
+    our $defaultNumberOfParallelWirelessLogins = '3';                                   # Default-Wert fuer max. Anzahl paraleller Logins im WLAN
+    our $radiusFramedMTU = 576;                                                         # MTU fuer Datenverkehr (576 soll gut sein) im WLAN
+    our $radiusIdleTimeout = 1800;                                                      # Anzahl Sekunden des NICHT-SENDENS bis zum Logout (Timeout) im WLAN
+    our $emailDomain = 'workshop.example.org';                                			# die Domain fuer die neuen Benutzer-E-Mail-Adressen (alles nach '@')
+    our $groupListsOfActiveUsers = '';                                                  # in diese (kommaseparierte Liste von) Gruppe(n) werden induviduelle Benutzer beim Anlegen und Aktivieren ein- und beim Loeschen und Sperren aus-getragen 
+    our @newLogins;                                                                     # Array fuer den Benutzer-Account (2D-Array um gleiche Aurufe auch fuer Konferenz-Accounts zu benutzen)
+
+    # Passwort-Einstellungen fuer neue Accounts und Passwortaenderungen
+    our $shadowMax = 3660;                                                              # max. Gueltigkeit des Unix- und Samba- Passwortes in Tagen
+    our $defaultValidDays = 180;                                                        # Anzahl Tage den ein Account per Default als gueltig angesehen wird (nur fuer eigene Testskripte gedacht)
+    our $shadowLastChange = (int($thisTime/24/3600));                                   # Zeitpunkt der Passworterstellung (Tage nach 1.1.1970)
+    our $shadowMin = 0;                                                                 # Datum wann das Passwort geaendert werden kann
+    our $shadowWarning = 7;                                                             # Anzahl Tage fuer Warnungen bei Passwort-Ablauf
+    our $shadowInactive = 7;                                                            # Anzahl Tage eines moegl. Logins nach Passwort-Ablauf
+    our $sambaPwdCanChange = $thisTime;                                                 # naechste moegliche Samba-Passwort-Aenderuung
+    our $sambaPwdLastSet = $thisTime;                                                   # letzte Samba-Passwort-Aenderuung
+    our $sambaPwdMustChange = ($thisTime+(60*60*24*$shadowMax));                        # naechste Pflicht zur Samba-Passwort-Aenderuung (Sekunden nach erstellen)
+    our $unixDisabledPasswordHash='{MD5}';                                              # dieser (leere) String wird als Passwort-Hashes fuer den zu sperrenden Benutzern ins LDIF eingetragen und dient auch zum Erkennen gesperrter Accounts
+	our @goodHashArtsByEnableOldPasswords=('{SSHA512}','{ssha512}');					# Liste erlaubter Passwort-Hash-Verfahren von Accounts bei deren Reaktivierung KEINE Warnung zum Passworthash ausgeben wird (falls Array leer -> keine Warnung)
+
+    # Dateinamen und Pfade zu Skripten und (temp.) Dateien/Verzeichnissen
+    our $pathOfScripts = '/usr/local/perlLdapAccountScripts/';                          # der Pfad zu allen Script-Dateien der perlLdapAccountScripts-Skripte
+    our $functionFile = $pathOfScripts.'functions';                                     # Datei mit eigenen Funktionen für die Skripte
+    our $optionsFile = $pathOfScripts.'help.txt';                                       # in dieser Datei stehen die Kommandozeilen-Optionen der Skript als kleine Doku und fuer getHelpText(...)
+    our $backupDirectory = $pathOfScripts.'backups/';                                   # Verzeichis fuer die Backups
+    our $ldifTempFilename = $pathOfScripts.'tmp/temp_ldap_file.ldif';                   # temporaere LDIF-Datei
+    our $ldapBackupFile = 'ldap_backup_'.$datestring.'.ldif';                           # Name der LDAP-Backups (Sicherheitskopie des LDAP-Baums)
+    our $userPasswordFile = 'userPasswords.txt';                                        # Liste der verschluesselten Benutzer-Passwoerter erzeugt im Skript: $skriptMakeLdapBackups
+    our $ldapEditor = '/usr/local/bin/gq';                                              # LDAP- Browser/Editor fuer weitere manuelle Aenderungen im LDAP
+    our $ldapAdminPasswordFile = '/root/.ldappw_'.$ldapServer;                          # falls diese Datei existiert, wird der Benutzer bei den Aufrufen von ldapadd und Co. in den Skripten nicht nach dem Passwort gefragt, sondern diese Passwortdatei genommen
+    our $dialogTempFile = $ENV{'HOME'}.'/.input_tmp.text';                              # Hier landen die Eingaben von dialog
+    our $systemOutputTempFile = $ENV{'HOME'}.'/.output_tmp.txt';                        # Hier landen Ausgaben von dialog und Co.
+    our $systemRunTempFile = $ENV{'HOME'}.'/.tmp_command.txt';                          # Datei zum temporaeren Speichern von System-Aurufen
+    our $deniedLoginNames  =  $pathOfScripts.'configs/deniedLoginNames';                # "Merkliste" fuer NICHT erlaubte oder frueher benutze Loginnamen fuer neue Benutzer (diese Liste wird nur bei $rememberAndCheckOldIds = 'y' beachtet)
+    our $fileDeniedUidNumbers = $pathOfScripts.'configs/usedUidNumbers';                # "Merkliste" fuer benutzte Benutzer-IDs (diese Liste wird nur bei $rememberAndCheckOldIds = 'y' beachtet)
+    our $fileDeniedGidNumbers = $pathOfScripts.'configs/usedGidNumbers';                # "Merkliste" fuer benutzte Gruppen-IDs (diese Liste wird nur bei $rememberAndCheckOldIds = 'y' beachtet)
+    our $fileDeniedSambaUID = $pathOfScripts.'configs/usedSIDs';                        # "Merkliste" fuer benutzte Samba-IDs (diese Liste wird nur bei $rememberAndCheckOldIds = 'y' beachtet)
+    our $fileHandoutTemplateStart = $pathOfScripts.'templates/handout.tex.start';       # START der LATEX-Handzettel fuer die Konferenzgaeste
+    our $fileHandoutTemplateUser = $pathOfScripts.'templates/handout.tex.user_part';    # Template des Benutzer-Abschnittes im induviduellen Account-Handzettel fuer die Konferenzgaeste
+    our $fileHandoutTemplateEnd = $pathOfScripts.'templates/handout.tex.end';           # ENDE der LATEX-Handzettel fuer die Konferenzgaeste
+
+    # anpassbare Werte fuer die Skripte und Accounts
+    our $noLoginName = 'skip';                                                       	# Name welcher eingegeben werden kann um ein Login auszulassen, dieser darf NICHT verboten oder im Einsatz sein
+    our $lockedHomeDir = '/dev/null';                                                   # dieses Heimatverzeichnis wird im LDAP fuer alle gesperrten Accounts verwendet
+    our $moveLockedHomeDirTo='/home/.old';                                              # in dieses Verzeichnis werden die Heimatverzeichnisse aller gesperrten Nutzer verschoben
+    our $lockedLoginShell = '/bin/false';                                               # diese Shell wird im LDAP fuer alle gesperrten Accounts verwendet
+    our $patternHomeDir = '/etc/skel/';                                                 # MUSTER-Heimatverzeichnis (am besten ein dazugehoeriges Login anlegen und sperren) (z.B. auch '/home/home_proto/')
+    our $defaultGivenName = '-';                                                        # der Default-Vorname fuer LDAP
+    our $defaultSn = '-';                                                               # der Default-Nachname fuer LDAP
+    our $usedGui = 'perl-print';                                                        # Welche Art der Ausgabe soll PER DEFAULT erfolgen? (Ausgabe per: perl-print, dialog, ...)
+    our $tmpOutputMessage = '';                                                         # speichert Ausgabetexte bis zur Ausgabe an Benutzer
+    our $maxLengthMenuLine = 150;                                                       # falls ein Menue-Eintrag laenger als dieser Wert wird, WARNUNG ausgeben (ansonsten evtl. FEHLERHAFTE Dialog-Auswahl)
+    our $disableSambaLMPassword = 'y';                                                  # falls 'y' werden beim Anlegen neuer Benutzer die unsicheren LanManager-Passwoerter (bis Windows ME) NICHT ins LDAP geschrieben
+    our $useTemplateEmailAddress = 'y';                                                 # falls 'y' wird beim Anlegen einzelner Accounts die eigene E-Mail $uid@$emailDomain ins LDAP eingetragen
+    our $storeNoLoginNamesToConferenceGroupAlso = 'y';									# wenn der Wert 'y' ist, werden auch die Logins mit "$noLoginName" spaeter in die Gruppe der Konferenz gespeichert (sinnvoll wenn ein Login bei mehreren Konferenzen genutzt werden soll)
+    our @NotifyCreatedUserEmailTo=('mail@example.org');                                 # eine Liste von E-Mail-Adressen, die beim Anlegen neuer oder Loeschen alter Accounts informiert werden
+    our @NotifyDeletedUserEmailTo=('mail@example.org');                                 # eine Liste von E-Mail-Adressen, die beim Loeschen alter Accounts informiert werden
+    our @NotifyDisabledUserEmailTo=('mail@example.org');                                # eine Liste von E-Mail-Adressen, die beim Deaktivieren von Accounts informiert werden
+    our @NotifyEnabledUserEmailTo=('mail@example.org');                                 # eine Liste von E-Mail-Adressen, die beim Reaktivieren eines Accounts informiert werden
+    our $sendEmailNotificationsfrom='mail@example.org';                                 # die Absenderadresse von der Informationen bei Accountaenderungen kommen
+    our $ldifAddHeader = "#\n# LDIF file - last change: ".$datestring."\n#\n";          # Header aller erstellten LDIF-Dateien
+
+#
+# Infos:
+# - "our" erlaubt es diese Variablen auch in anderen Skripten zu nutzen wenn dieses Skript dort mittels "require './NAME';" geladen wird.
+# - zum Suchen welche Variablen genutzt sein koennen z.B. einsetzen: 'for i in `grep 'our ' configs/config | grep -v '^#' | awk -F '$' '{ print $2 }' | awk -F ' ' '{ print $1 }' | grep -v '^$'`; do echo "found $i"; grep $i * utilitys/*; echo '+++'; sleep 2; done 2> /dev/null'
+#
+
+1; # beende den INCLUDE der Datei mit einer sauberen Rueckgabe (noetig fuer "require DATEI;" )

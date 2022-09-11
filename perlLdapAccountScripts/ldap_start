@@ -1,0 +1,276 @@
+#!/usr/bin/perl
+#
+# start script for the perlLdapAccountScripts, to get an overview
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                               # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                              # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                  # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='CREATE USER ACCOUNTS';                                                # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                           # als Zwischenspeicher fuer Ausgaben
+    $numberUsers=0;                                                             # Anzahl der manuell eingegeben Benutzer (DIES MUSS 0 SEIN, FALLS LOGINLISTE EINGESETZ WERDEN SOLL.)
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; $guiParmeters='-i c'; }                                        # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; $guiParmeters='-i d'; }                                        # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'ldap_start','--------------------','y','y'));
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+    
+
+## Abfrage, des Layout-stiles
+
+          # falls der Layoutstil bisher unbekannt war
+          if ($usedGui eq '')
+          {
+                    $usedGui='perl-print';
+                    
+                    # Der Benutzer kann waehlen, ob er DIALOG oder die normale Kommandozeilenausgabe zur weiteren Abarbeitung haben moechte
+                    $windowTitle="Layout-Wahl";
+                    open newFile, '>'.$systemOutputTempFile or outputAndDie("ERROR: Could not write file: '$systemOutputTempFile'");
+                    print newFile "dialog style\n";
+                    print newFile "command line style\n";
+                    close newFile;
+                    ($lineNumber,$choice)=outputFileAsMenu('Please choose the default layout for the scripts: ',$systemOutputTempFile,'');
+                    if ($lineNumber==1) { $usedGui='dialog'; } else { $usedGui='perl-print'; }
+                    
+                    $askUserForGuiType == 'n';
+          }
+
+
+###################################################################################################
+
+
+## STARTMENUE erstellen und anzeigen
+
+    my $lineNumber=0;
+    
+    $windowTitle='Menu of the perlLdapAccountScripts of Thomas Mueller';         # Fenstertitel fuer Menue
+    open newFile, '>'.$systemOutputTempFile or outputAndDie("ERROR: Could not write file: '$systemOutputTempFile'");
+    print newFile "++++++++++++++++++++++++++++++++++\n";
+    print newFile "show all user accounts\n";
+    print newFile "show all machine accounts\n";
+    print newFile "show all groups\n";
+    print newFile "++++++++++++++++++++++++++++++++++\n";        
+    print newFile "create user account\n";
+    print newFile "show details of a user accounts\n";
+    print newFile "lock user account\n";
+    print newFile "unlook user account\n";
+    print newFile "delete user account\n";
+    print newFile "++++++++++++++++++++++++++++++++++\n";
+    print newFile "create machine account (Samba PDC)\n";
+    print newFile "show details of a machine account\n";
+    print newFile "delete machine account\n";
+    print newFile "++++++++++++++++++++++++++++++++++\n";
+    print newFile "create conference accounts\n";
+    print newFile "delete conference accounts\n";
+    print newFile "++++++++++++++++++++++++++++++++++\n";        
+    print newFile "create group\n";
+    print newFile "show details of a group\n";
+    print newFile "delete group\n";
+    print newFile "add user(s) to group(s)\n";  
+    print newFile "delete user(s) from group\n";    
+    print newFile "++++++++++++++++++++++++++++++++++\n";
+    print newFile "show HELP\n";
+    print newFile "make ldap backup                  \n";
+    print newFile "install ldap backup (Be carefull!)\n";
+    print newFile "start LDAP BROWSER / EDITOR\n";
+    print newFile "++++++++++++++++++++++++++++++++++\n";
+    close newFile;
+    
+    ($lineNumber,$choice)=outputFileAsMenu(' ',$systemOutputTempFile,'');
+
+       
+## Umwandelung der Zeilennummern in Namen um bei Verschiebungen im Hauptmenue nicht immer alle "if"-Abfragen unten abaendern zu muessen
+    
+    my $runScript='';
+    
+    if ($lineNumber==2) { $runScript="userOverview"; }
+    if ($lineNumber==3) { $runScript="machineOverview"; }
+    if ($lineNumber==4) { $runScript="groupOverview"; }
+    
+    if ($lineNumber==6) { $runScript="userCreate"; }
+    if ($lineNumber==7) { $runScript="userShow"; }
+    if ($lineNumber==8) { $runScript="userDisable"; }
+    if ($lineNumber==9) { $runScript="userEnable"; }
+    if ($lineNumber==10) { $runScript="userDelete"; }
+    
+    if ($lineNumber==12) { $runScript="machineCreate"; }
+    if ($lineNumber==13) { $runScript="machineShow"; }
+    if ($lineNumber==14) { $runScript="machineDelete"; }
+    
+    if ($lineNumber==16) { $runScript="conferenceCreate"; }
+    if ($lineNumber==17) { $runScript="conferenceDelete"; }
+    
+    if ($lineNumber==19) { $runScript="groupCreate"; }
+    if ($lineNumber==20) { $runScript="groupShow"; }    
+    if ($lineNumber==21) { $runScript="groupDelete"; }
+    if ($lineNumber==22) { $runScript="addUserToGroup"; }
+    if ($lineNumber==23) { $runScript="deleteUserFromGroup"; }
+    
+    if ($lineNumber==25) { $runScript="help"; }
+    if ($lineNumber==26) { $runScript="makeLdapBackup"; }
+    if ($lineNumber==27) { $runScript="installLdapBackup"; }
+    if ($lineNumber==28) { $runScript="startLdapEditor"; }
+        
+    if ($namendParameters{"--debug"} eq 'SET') { print 'DEBUG: You choose NR: '.$lineNumber.' to run the section '.$runScript." on this start script.\n"; }     # DEBUG-Ausgabe des Menues
+
+
+###################################################################################################
+
+
+## Benutzeraccounts anzeigen -> zeige einige Daten aus den LDAP-ACCOUNTS an
+    if ($runScript eq "userOverview") {
+          system ($pathOfScripts."show_ldap_details -U ".$guiParmeters.' | less');
+    }
+
+## Maschinenaccounts anzeigen -> zeige einige Daten aus den LDAP-ACCOUNTS an
+    if ($runScript eq "machineOverview") {
+          system ($pathOfScripts."show_ldap_details -M ".$guiParmeters.' | less');
+    }
+
+## Gruppen anzeigen -> zeige einige Daten aus den LDAP-ACCOUNTS an
+    if ($runScript eq "groupOverview") {
+          system ($pathOfScripts."show_ldap_details -G ".$guiParmeters.' | less');
+    }
+
+
+
+## Benutzeraccount erstellen
+    if ($runScript eq "userCreate") {
+          system ($pathOfScripts."create_ldap_user ".$guiParmeters);
+    }
+
+## Benutzeraccount ansehen
+    if ($runScript eq "userShow") {
+          system ($pathOfScripts."show_ldap_details -u -b ".$guiParmeters);
+    }
+    
+## Benutzeraccount sperren
+    if ($runScript eq "userDisable") {
+          system ($pathOfScripts."disable_ldap_users ".$guiParmeters);
+    }
+
+## Benutzeraccount entsperren
+    if ($runScript eq "userEnable") {
+          system ($pathOfScripts."enable_ldap_user ".$guiParmeters);
+    }
+
+## Benutzeraccount loeschen
+    if ($runScript eq "userDelete") {
+          system ($pathOfScripts."delete_ldap_user ".$guiParmeters);
+    }
+
+
+
+## Maschinenaccount erstellen
+    if ($runScript eq "machineCreate") {
+          system ($pathOfScripts."create_ldap_machine ".$guiParmeters);
+    }
+    
+## Maschinenaccount ansehen
+    if ($runScript eq "machineShow") {
+          system ($pathOfScripts."show_ldap_details -m -b ".$guiParmeters);
+    }
+
+## Maschinenaccount loeschen
+    if ($runScript eq "machineDelete") {
+          system ($pathOfScripts."delete_ldap_machine ".$guiParmeters);
+    }
+
+
+
+## Konferenz erstellen
+    if ($runScript eq "conferenceCreate") {
+          system ($pathOfScripts."create_ldap_conference_users ".$guiParmeters);
+    }
+
+## Konferenz loeschen
+    if ($runScript eq "conferenceDelete") {
+          system ($pathOfScripts."delete_ldap_conference_users ".$guiParmeters);
+    }
+
+
+
+## Gruppe erstellen
+    if ($runScript eq "groupCreate") {
+          system ($pathOfScripts."create_ldap_group ".$guiParmeters);
+    }
+    
+## Gruppe ansehen
+    if ($runScript eq "groupShow") {
+          system ($pathOfScripts."show_ldap_details -g -b ".$guiParmeters);
+    }
+    
+## Gruppe loeschen
+    if ($runScript eq "groupDelete") {
+          system ($pathOfScripts."delete_ldap_group ".$guiParmeters);
+    }
+
+## Benutzer zu einer Gruppe hinzufuegen
+    if ($runScript eq "addUserToGroup") {
+          system ($pathOfScripts."add_ldap_users_to_groups ".$guiParmeters);
+    }
+
+## Benutzer aus einer Gruppe loeschen
+    if ($runScript eq "deleteUserFromGroup") {
+          system ($pathOfScripts."delete_ldap_users_from_groups ".$guiParmeters);
+    }
+
+
+
+## HILFE ANZEIGEN
+
+    if ($runScript eq "help") {
+        system ('less '.$optionsFile);
+    }        
+
+## LDAP-Backup erstellen
+
+    if ($runScript eq "makeLdapBackup") {
+        system ($pathOfScripts."make_ldap_backup ".$guiParmeters);
+    }
+
+## LDAP-Backup installieren
+
+    if ($runScript eq "installLdapBackup") {
+        system ($pathOfScripts."install_ldap_backup ".$guiParmeters);
+    }       
+
+## LDAP- Browser bzw. Editor starten
+
+    if ($runScript eq "startLdapEditor") {
+        system ($ldapEditor);
+    }
+    
+## Neustart des Menues bei flascher Auswahl oder am Ende jeder Operation
+
+    exec "$0 $guiParmeters";
+

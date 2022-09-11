@@ -1,0 +1,184 @@
+#!/usr/bin/perl
+#
+# perl based script to delete a ldap (conference) group and all members of ldap group
+# this is usefull to remove the accounts, created by the command delete_ldap_conference_users 
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                                      # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                     # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                         # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='DELETE CONFERENCE ACCOUNTS';                                                                         # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage='';                                                                                          # als Zwischenspeicher fuer Ausgaben
+    our $systemDeleteHomes='';
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                                                     # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                                                         # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'delete_ldap_conference_users','--------------------','y','y'));                                  # holt alle Zeilen aus der Doku-Datei und gibt diese aus
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+
+### INFO AN BENUTZER AUSGEBEN
+
+    outputInfo("ATTENTION: Conference users are members of UNIX groups. This script remove all users which are members of the given or chosen UNIX group. Please be careful !!!\n");
+
+
+### Gruppennamen aus dem Parameter holen und pruefen ODER anzeigen der Liste vorhandener Gruppen und zur Auswahl anbieten ###
+
+    # DN (kompletter LDAP-Pfad) holen oder auswaehlen (und in die Variable $choise sichern)
+        my $choise=chooseOrTestLdapItem($ldapGroupBase,$namendParameters{"-n"},'cn');                                   # gibt die vollstaendige, lange 'DN' des LDAP-Eintrags zurueck
+    
+    # cn (kurzer Name) der Gruppe auslesen
+    @ldapSearchArray=('cn'); @ldapFoundArray=();                                                    # Gruppenname (cn) aus LDAP holen, fuer die spaetere Anzeige
+    ldapValueSearch($choise,\@ldapSearchArray,'','y',\@ldapFoundArray,'','','','');
+    
+    # Variablen fuer spaetere Zugriffe
+    my $ldapGroupCN=@ldapFoundArray[0];                                                     # der kurze Name der Gruppe
+    my $ldapGroupDN=$choise;                                                            # die komplette DN zur Gruppe
+
+### hole die Logins alle Benutzer aus der Unix-Gruppe im LDAP ###
+
+    my $ldapSearchBase=$choise;     #'cn='.$nameOfConference.','.$ldapGroupBase;                                    # LDAP-Knoten der durchsucht bzw. gesucht werden soll
+    my $ldapSearchValue='memberUid';                                                        # Attribut, dass am LDAP-Knoten gesucht werden soll
+    (my $errorMessage,my $numbersOfVaulues,my @ldapFoundArray)=getSimpleLdapValue($ldapSearchBase,$ldapSearchValue);                # starte die Suchanfrage
+
+    my @ldapUserArray=@ldapFoundArray;                                                      # Array der Logins, die in der Gruppe stehen (diese muessen nicht mehr alle existieren)
+
+
+### lade die Logins, Heimatverzeichnisse und DNs der Nutzer der Gruppe
+
+    my @ldapUserAndHomeArray;                                                           # neues 2D-Array fuer die Heimatverzeichnisse und Logins der Gruppen-Mitglieder
+    my $numberOfUsersOfGroup=0;                                                         # Anzahl der Logins in der Gruppe
+
+    for (my $i=0; $i<$numbersOfVaulues; $i++)
+    {
+        my $ldapSearchBase='uid='.@ldapUserArray[$i].','.$ldapUserBase;                                     # LDAP-Knoten der durchsucht bzw. gesucht werden soll (je ein Benutzer-Account)
+        my $ldapSearchValue='homeDirectory';                                                    # gesucht wird das Heimatverzeichnis des Benutzers in dessen Account
+        
+        (my $errorMessage,my $numbersOfVaulues2,my @ldapFoundArray)=getSimpleLdapValue($ldapSearchBase,$ldapSearchValue);           # starte die Suchanfrage nach den Heimatverzeichnissen
+
+        if ($numbersOfVaulues2 > 0)                                                         # lasse nicht mehr existierende Accounts aus
+        {   
+            $ldapUserAndHomeArray[$numberOfUsersOfGroup][0]=$ldapUserArray[$i];                             # schreibe das LOGIN (uid) des aktuellen Benutzers in das 2D-Array
+            $ldapUserAndHomeArray[$numberOfUsersOfGroup][1]=$ldapFoundArray[0];                             # schreibe das Heimatverzeichnis (falls es existiert) des aktuellen Benutzers in das 2D-Array
+            $numberOfUsersOfGroup++;                                                    # zaehle (und schreibe in das Array) nur die noch im LDAP existierende Benutzer-Accounts
+        }
+    }
+    
+    # DEBUG-MODUS: Ausgabe der Heimatverzeichnisse jedes Benutzers
+    if ($namendParameters{"--debug"} eq 'SET') {
+        for (my $i=0; $i<$numberOfUsersOfGroup; $i++)
+        {
+            $tmpOutputMessage.='User "'.$ldapUserAndHomeArray[$i][0].'" with home directory "'.$ldapUserAndHomeArray[$i][1].'"'."\n";   # gib jeden Benutzer mit seinem Login und seinem Heimatverzeichnis aus
+        }
+        outputInfo("FOUND THE FOLLOWING ".$ldapNumbersOfFoundUsers." ACCOUNTS TO DELETE:\n\n".$tmpOutputMessage."\nIt's possible that some accounts and home directory was deleted before.");
+    }
+
+
+### Kontrollausgabe der Benutzer und Frage ob diese wirklich geloescht werden sollen ###
+
+    $tmpOutputMessage="\nFound the following ".$numberOfUsersOfGroup." accounts of the group:\n";
+    for (my $i=0; $i<$numberOfUsersOfGroup; $i++)                                                   # erstelle eine CSV-'Kette' von den zu loeschenden Accounts
+    {
+        if ($i>0) { $tmpOutputMessage.=','; }                                                   # Trennzeichen zwischen den Loginnamen
+        $tmpOutputMessage.=$ldapUserAndHomeArray[$i][0];                                            # haenge das aktuelle Login an die 'Kette' der vorhandenen an
+    }
+    my $tmpContinue=yesNoQuestion($tmpOutputMessage."\n\nShould I really DELETE ALL this accounts ? ",'y','n','y');                 # zeige zu loeschende Benutzer an und frage noch einmal nach
+    
+    if ( $tmpContinue ne 'y' ) { outputAndDie("The process was stopped now."); }                                    # Abbruch, falls Benutzer doch nicht geloescht werden sollen
+
+
+### LDIF-Datei zum Loeschen aller Benutzer erstellen und mit LDAP-ADMIN-PASSWORT an den Server senden lassen ###
+
+    if ($namendParameters{"-debug"} eq 'SET') { outputInfo("Creating a LDIF-File to delete all users of the conference.\n"); }
+
+    open (openfile, '>'.$ldifTempFilename) or outputAndDie("ERROR: Could not write the file '".$ldifTempFilename."'.\n");
+    for (my $i=0; $i<$numberOfUsersOfGroup; $i++)
+    {
+        print openfile 'uid='.$ldapUserAndHomeArray[$i][0].','.$ldapUserBase."\n";
+    }
+    close openfile;
+
+        $tmpOutputMessage.="Please type the LDAP administartor password to DELETE ALL CONFERENCE USERS of the GROUP '".$ldapGroupCN."'.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapdelete -v -x -h $ldapServer -D $ldapAdminBind -W -f $currentDirectory"."$ldifTempFilename",''); # loescht mittels Passwort die LDAP-Daten
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n"); 
+
+        $tmpOutputMessage.="Please type the LDAP administartor password again to DELETE the (now unused) conference GROUP '".$ldapGroupCN."'.\n";           # loescht die UNIX-Gruppe der Konferenz
+        runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapdelete -v -x -h $ldapServer -D $ldapAdminBind -W $ldapGroupDN",'');
+
+
+### loesche der Heimatverzeichnisse nach Abfrage oder je nach Parameter ###
+
+    if (!($namendParameters{"-h"} eq 'k'))
+    {
+        outputInfo("\nDeleteing the home directories of the old conference users. This can take a while ...\n");
+        $tmpOutputMessage='';
+        
+        for (my $i=0; $i<$numberOfUsersOfGroup; $i++)
+        {
+            $home=$ldapUserAndHomeArray[$i][1];
+            if (($home !~ /^\/dev\//)&&($home ne ''))
+            {
+                # da es bei einer sehr langen Komandozeile Probleme geben kann, lieber die Verzeichnisse einzeln loeschen
+                $tmpOutputMessage.='/bin/rm -rf '.$home."\n";
+            }
+        }
+        $systemDeleteHomes=$tmpOutputMessage;
+    }
+    
+    my $tmpYesNoQuestion;
+    
+    if (!(($namendParameters{"-h"} eq 'k')||($namendParameters{"-h"} eq 'd')))                                                                          # falls die Frage nicht durch die Parameter unnoetig wird
+    {
+        $tmpYesNoQuestion=yesNoQuestion("\nCOMMAND(S):\n\n".$systemDeleteHomes."\n\nShould I really run this command(s) to DELETE the directories of the conference users ? ",'y','n','y');     # zeige zu loeschende Benutzer an und frage noch einmal nach
+    }
+    
+        if (($namendParameters{"-h"} eq 'd')||($tmpYesNoQuestion eq 'y'))
+    {
+        system $systemDeleteHomes;                                                      # loesche die Heimatverzeichnisse
+        outputInfo("The home directories of the ".$numberOfUsersOfGroup." conference users was deleted, now.\n");
+    }
+    else
+    {
+        outputInfo("The home directories was NOT deleted, now.\n");
+    }
+
+
+### NSCD-Cache der Benutzer und Gruppen neu einlesen lassen. ###
+
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo("reloading the local nscd (name service cache daemon) for the groups and accounts ...\n"); }
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+
+
+exit 0;

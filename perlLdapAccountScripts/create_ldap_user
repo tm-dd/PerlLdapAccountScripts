@@ -1,0 +1,313 @@
+#!/usr/bin/perl
+#
+# perl based script to create a ldap user
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                               # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                              # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                  # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='CREATE USER ACCOUNTS';                                                # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                           # als Zwischenspeicher fuer Ausgaben
+    $numberUsers=0;                                                             # Anzahl der manuell eingegeben Benutzer (DIES MUSS 0 SEIN, FALLS LOGINLISTE EINGESETZ WERDEN SOLL.)
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                      # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                      # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'create_ldap_user','--------------------','y','y'));
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+    
+    # lese globale UID, UIDNumbers und SambaSIDs ein (nach @listUsedUid @listUsedUidNumber @listUsedSambaSID)
+    readSystemIDs();
+
+
+### WERTE ZUM ACCOUNT ABFRAGEN UND ERSTELLEN ###
+
+    ## leere Zeile bei Kommandozeilenausgabe (der reinen Schoenheit wegen)
+    if ($usedGui eq 'perl-print') { print "\n"; }
+
+    ## LOGIN
+    if ($namendParameters{"-u"} ne '') {
+        # Login des Benutzers aus Parameter holen und pruefen
+        $loginName=testSimpleStrings($namendParameters{"-u"},'login');
+        $loginName=testUid($loginName);                                                 # pruefe das Login (uid) und passe es ggf. an
+        if ($loginName eq $noLoginName) { outputAndDie("Without a login name there is nothing to do, now.\n"); }            # pruefe ob der Account IMMER NOCH noch gewuenscht ist
+    }
+    else {
+        # manuelle Eingabe des Nachnames
+        $loginName=inputText('login: ');                                                # Eingabe des LDAP-Logins
+        $loginName=testUid($loginName);                                                 # pruefe das Login (uid) und passe es ggf. an
+        if ($loginName eq $noLoginName) { outputAndDie("Without a login name there is nothing to do, now.\n"); }            # pruefe ob der Account nun noch gewuenscht ist
+    }
+    
+    ## VORNAME
+    if ($namendParameters{"-f"} ne '') {
+        # Vorname des Benutzers aus Parameter holen und pruefen
+        $firstNameOfUser=testSimpleStrings($namendParameters{"-f"},'first name');
+    }
+    else {
+        # manuelle Eingabe des Vornamens
+        $firstNameOfUser=inputText('first name: ');                                         # Eingabe des LDAP-Vornamens
+        $firstNameOfUser=testSimpleStrings($firstNameOfUser,'first name');                              # pruefe und ersetzte ggf. den Vornamen
+    }
+    
+    ## NACHNAME
+    if ($namendParameters{"-s"} ne '') {
+        # Nachname des Benutzers aus Parameter holen und pruefen
+        $surnameOfUser=testSimpleStrings($namendParameters{"-s"},'surname');
+    }
+    else {
+        # manuelle Eingabe des Nachnames
+        $surnameOfUser=inputText('surname: ');                                              # Eingabe des LDAP-Nachname
+        $surnameOfUser=testSimpleStrings($surnameOfUser,'surname');                                 # pruefe und ersetzte ggf. den Nachname
+    }
+    
+    ## FULL NAME OF USER
+    if ($namendParameters{"-d"} ne '') {
+        $fullNameOfUser=$namendParameters{"-d"};                                            # falls gesetzt, nutze diesen Namen fuer displayName und cn spaeter
+    }    
+    else {
+        $fullNameOfUser=$firstNameOfUser.' '.$surnameOfUser;                                            # erstelle den vollen Benutzernamen aus Vor- und Nachname
+    }
+
+    ## E-MAIL ADRESSE   
+    if ($useTemplateEmailAddress eq 'y')
+    {
+        # Falls diese Option gesetzt ist, KANN man fuer den Nutzer keine induviduelle E-Mail-Adresse ins LDAP eintragen
+
+        # Falls login scheinbar eine E-Mail-Adresse ist, benutze login auch als E-Mail-Adresse.
+        if ( $loginName =~ /@/ ) {
+            $emailOfUser=$loginName
+        }
+        # ansonsten erstelle die E-Mail-Adresse aus Login und Domain
+        else {
+            $emailOfUser=$loginName.'@'.$emailDomain;
+        }
+
+        # eine Fehlermeldung ausgeben, falls der Nutzer eine E-Mail-Adresse angegeben hat
+        if ($namendParameters{"-m"} ne '') {
+            outputInfo($tmpOutputMessage."ERROR: Defining the first email address for a new users is forbidden in your configuration file (see option useTemplateEmailAddress).\n");
+        }
+    }
+    else
+    {
+        if ($namendParameters{"-m"} ne '') {
+            # Nachname des Benutzers aus Parameter holen und pruefen
+            $emailOfUser=testSimpleStrings($namendParameters{"-m"},'email');
+        }
+        else {
+            # manuelle Eingabe des Nachnames
+            $emailOfUser=inputText('email ',$loginName.'@'.$emailDomain);                               # Eingabe der E-Mail-Adresse
+            $emailOfUser=testSimpleStrings($emailOfUser,'email');                                   # pruefe und ersetzte ggf. die E-Mail-Adresse
+        }
+    }
+
+    ## QUOTA FOR CLOUD SPACE
+    if ($namendParameters{"-q"} ne '') {
+        # Quota des Benutzers aus Parameter holen und pruefen
+        $cloudQuotaOfUser=testSimpleStrings($namendParameters{"-q"},'quota');
+    }
+    else {
+        # manuelle Eingabe der Quota
+        $cloudQuotaOfUser=inputText('quota ',$defaultQuotaCloudSpace);                                              # Eingabe des Quota fuer die Cloud
+        $cloudQuotaOfUser=testSimpleStrings($cloudQuotaOfUser,'quota');                                 # pruefe und ersetzte ggf. die Quota
+    }
+
+    ## NUMBERS OF PARALLEL WIRELESS LOGIN
+    if ($namendParameters{"-w"} ne '') {
+        # Loginanzahl des Benutzers aus Parameter holen und pruefen
+        $numberOfParallelWirelessLogins=testSimpleStrings($namendParameters{"-w"},'numbers of parallel wireless logins');
+    }
+    else {
+        # manuelle Eingabe der Loginanzahl
+        $numberOfParallelWirelessLogins=inputText('numbers of parallel wireless logins ',$defaultNumberOfParallelWirelessLogins);                       # Eingabe der Loginanzahl
+        $numberOfParallelWirelessLogins=testSimpleStrings($numberOfParallelWirelessLogins,'numbers of parallel wireless logins');   # pruefe und ersetzte ggf. die Loginanzahl
+    }
+
+    ## Erstelle UID Number und Samba-SID
+    my @listFreeUIDNubers;
+    my @listFreeSambaUIDs;
+    searchFreeIDs(1,$firstUidNumber,$lastUidNumber,'Unix-UIDs',\@listUsedUidNumber,\@listFreeUIDNubers);                    # freieIDs fuer Unix-UID
+    searchFreeIDs(1,$firstSambaUID,$lastSambaUID,'Samba-SIDs',\@listUsedSambaSID,\@listFreeSambaUIDs);                  # freieIDs fuer Samba
+    $uidNumber=@listFreeUIDNubers[0];                                                   # die Unix-UID-Nummer
+    $sambaSIDUserPart=@listFreeSambaUIDs[0];                                                # der Benutzer-SambaSID-Anteil
+
+    ## KONTROLL-AUSGABE DER DATEN
+    $useThisNewManualUser = yesNoQuestion("\nConfiguration of the new user:\n\nfirst name: $firstNameOfUser\nsurname: $surnameOfUser\nfull name: $fullNameOfUser\nlogin: $loginName\nUID number: $uidNumber\nSamba SID: $sambaServerSID-$sambaSIDUserPart\nemail: $emailOfUser\nquota cloud space: $cloudQuotaOfUser\nparallel wireless logins: $numberOfParallelWirelessLogins\n\nAre these values correct ?",'y','n','y');
+    if ($useThisNewManualUser eq 'n') { outputAndDie("Exit now.\n"); }
+    
+    $passwordText1='Please type the password for the new user: ';
+    $passwordText2='Please type the password again: ';
+        
+    ## PASSWORT (ABFRAGEN) UND HASHES ERSTELLEN
+    if ($namendParameters{"-p"} ne '') {
+        ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,$namendParameters{"-p"});
+    }
+    else {
+        ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,'');
+    }
+    
+    # ueberschreiben des unsicheren LM-Passwortes (ist fuer SMB-Zugriffe bis Windows ME noetig), wenn dies gewuenscht ist
+    if ($disableSambaLMPassword eq 'y') {
+        $sambaLMPassword='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+    } 
+
+    # falls gewuenscht, setze ein Beschreibungsfeld
+    if ($namendParameters{"-n"} ne '') {
+        $description=$namendParameters{"-n"};
+    }
+    else {
+        $description='account '.$loginName;
+    }
+
+    # falls gewuenscht, benutze einen alternativen LDAP-Benutzerzweig
+    if ($namendParameters{"-a"} ne '') {
+        $ldapUserBase=$namendParameters{"-a"};
+    }
+
+    # falls nur das Unix-Passwort gespeichert werden soll, ueberschreibe das Samba-Kennwort
+    if ($namendParameters{"--onlyUnixPw"} eq 'SET') {
+        $sambaNTPassword='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+        $sambaLMPassword='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+    }
+
+    # falls nur das Samba-Passwort gespeichert werden soll, ueberschreibe das Unix-Kennwort
+    if ($namendParameters{"--onlySambaPw"} eq 'SET') {
+        $userPassword=$unixDisabledPasswordHash;
+    }
+
+    # setze die Werte fuer Heimatverzeichnis und Shell fuer das LDAP
+    if ($namendParameters{"--noHomeAndShell"} eq 'SET') {
+        $homeDirectory=$lockedHomeDir;
+        $loginShell=$lockedLoginShell;        
+    }
+    else {
+        $homeDirectory=$stdHomeDir.$loginName;
+        $loginShell=$stdLoginShell;
+    }
+
+
+    # Anzahl neuer Benutzer merken (wichtig fuer spaeter)
+    $numberUsers=1;
+
+
+### fuelle das ARRAY mit Werten ####
+
+    $newLogins[0][1]=$loginName;                                                        # login name
+    $newLogins[0][2]=$uidNumber;                                                        # unix id of the user
+    $newLogins[0][3]=$sambaSIDUserPart;                                                 # last user part of the Samba SID
+    $newLogins[0][4]=$firstNameOfUser;                                                  # first name of the user
+    $newLogins[0][5]=$surnameOfUser;                                                    # surname of the user
+    $newLogins[0][6]=$fullNameOfUser;                                                   # used by displayName und cn in ldap
+    $newLogins[0][7]=$emailOfUser;                                                      # email adress of the user
+    $newLogins[0][8]=$cloudQuotaOfUser;                                                 # quota of the disk space of cloud storage (ownCloud)
+    $newLogins[0][9]=$numberOfParallelWirelessLogins;                                   # numbers of paralle wireless devices (eduroam, ...)
+    $newLogins[0][10]=$userPassword;                                                    # the unix password hash
+    $newLogins[0][11]=$sambaNTPassword;                                                 # the samba NT password hash
+    $newLogins[0][12]=$sambaLMPassword;                                                 # the samba Lan Manager password hash
+    $newLogins[0][13]=$description;                                                     # an optional description for the Account
+    $newLogins[0][14]=$homeDirectory;                                                   # the homeDirectory
+    $newLogins[0][15]=$loginShell;                                                      # the loginShell
+
+### Lege die Accounts an ###
+
+    # erstelle die LDIF-DATEI
+    createLdifFileForNewUsers($ldifTempFilename,$numberUsers);
+    
+    # LDAP-Daten hinzufuegen mittels eines LDAP-Admin-Passwortes oder falls vorhanden ueber die Passwortdatei
+    $tmpOutputMessage.="Please type the LDAP administartor password to create the new user '".$loginName."' OR stop that with a wrong password.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapadd -x -D ".$ldapAdminBind." -h ".$ldapServer." -W -f ".$ldifTempFilename,'');
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n");
+
+    # erstelle die lokalen Dateien und Verzeichnise fuer den/die Benutzer
+    if ($namendParameters{"--noHomeAndShell"} ne 'SET')
+    {
+        createUserFiles($numberUsers);
+    }
+    
+
+### merke die eingesetzten IDs in den Sperrlisten ###
+
+    # falls Sperrlisten eingesetzt werden sollen, merke jetz die neuen IDs
+    if ($rememberAndCheckOldIds eq 'y') 
+    {
+        for ($i=0;$i<$numberUsers;$i++)
+        {
+            system "echo '".$newLogins[$i][1]."' >> ".$deniedLoginNames;                                # den Login-Namen des Benutzers merken
+            system "echo '".$newLogins[$i][2]."' >> ".$fileDeniedUidNumbers;                            # die UNIX-UID des Benutzers merken
+            system "echo '".$newLogins[$i][3]."' >> ".$fileDeniedSambaUID;                              # die Samba-SID des Benutzers merken
+        }
+    }
+
+
+### fuege den Benutzer zur (den) Gruppe(n) der aktiven Benutzeraccounts hinzu
+
+    # falls nicht anderes gewuenscht
+    if (($namendParameters{"--unchangeGroups"} ne 'SET')&&($groupListsOfActiveUsers ne '')&&($namendParameters{"--noHomeAndShell"} ne 'SET'))
+    {
+        outputInfo("Put the user '$loginName' into the ldap group(s) '$groupListsOfActiveUsers' ...");
+        system ($pathOfScripts.'add_ldap_users_to_groups -g '.$groupListsOfActiveUsers.' -u '.$loginName.' -i '.$namendParameters{"-i"});                       
+    }
+
+
+### sende eine E-Mail, dass ein neuer Nutzeraccount erstellt wurde ###
+
+    if ($namendParameters{"--noHomeAndShell"} ne 'SET')
+    {
+        open(MAIL,'| /usr/sbin/sendmail -t');
+        print MAIL "To: ";
+        for my $target (@NotifyCreatedUserEmailTo)
+        {
+            print MAIL "$target, ";
+        }
+        print MAIL "\n";
+        print MAIL "From: $sendEmailNotificationsfrom\n";
+        print MAIL "Subject: New account >> $loginName << created for >> $fullNameOfUser <<\n";
+        print MAIL "The following new account was created:\n\n";
+        print MAIL "   first name: $firstNameOfUser\n";
+        print MAIL "   surname:    $surnameOfUser\n";
+        print MAIL "   full name:  $fullNameOfUser\n";
+        print MAIL "   login:      $loginName\n";
+        print MAIL "   email:      $emailOfUser\n";
+        print MAIL "   ldap base:  $ldapBase\n\n";
+        print MAIL "Time of creation: ".localtime()."\n\n";
+        close(MAIL);
+    }
+
+
+### aufraeumen und beenden ###
+
+    # Benenden des Scriptes mit Meldung
+    outputInfo($tmpOutputMessage."The Account should be created now.\n\n");
+    
+    exit 0;

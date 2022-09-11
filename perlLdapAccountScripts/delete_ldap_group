@@ -1,0 +1,68 @@
+#!/usr/bin/perl
+#
+# perl based script to remove a ldap group
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                                           # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                          # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                              # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='DELETE GROUP';                                                                                        # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                                                               # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                                                          # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                                                              # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'delete_ldap_group','--------------------','y','y'));                                                  # holt alle Zeilen aus der Doku-Datei und gibt diese aus
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+
+### Gruppennamen aus dem Parameter holen und pruefen ODER anzeigen der Liste vorhandener Gruppen und zur Auswahl anbieten ###
+
+        my $choise=chooseOrTestLdapItem($ldapGroupBase,$namendParameters{"-n"},'cn');   # gibt die vollstaendige, lange 'DN' des LDAP-Eintrags zurueck
+    
+    @ldapSearchArray=('cn'); @ldapFoundArray=();                                        # Gruppenname (cn) aus LDAP holen, fuer die spaetere Anzeige
+    ldapValueSearch($choise,\@ldapSearchArray,'','y',\@ldapFoundArray,'','','','');
+    my $cn=@ldapFoundArray[0];
+
+
+### loeschen des LDAP-Eintrages mit Angabe des LDAP-Admin-Passwortes
+
+        $tmpOutputMessage.="Please type the LDAP administartor password to delete the group '".$cn."' OR stop that with a wrong password.\n";
+        runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapdelete -v -x -h $ldapServer -D $ldapAdminBind -W $choise",'');
+
+
+### NSCD-Cache der Gruppen neu einlesen lassen. NOETIG, da sonst Gruppen-Konfigurationen erst nach einiger Zeit bzw. Neustart korrekt nutzbar sind.
+
+        if ($namendParameters{"--debug"} eq 'SET') { outputInfo("reloading the local nscd (name service cache daemon) for the groups ...\n"); }
+        if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group"; }
+
+exit 0;

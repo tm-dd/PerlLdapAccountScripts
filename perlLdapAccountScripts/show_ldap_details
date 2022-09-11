@@ -1,0 +1,173 @@
+#!/usr/bin/perl
+#
+# perl based script to get informations about users, groups and windows machine accounts
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                                      # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                     # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                                         # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+### variables and defaults ###
+
+    our $windowTitle='SHOW LDAP INFORMATIONS';                                                                         # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                                                          # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                                                     # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                                                         # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'show_ldap_details','--------------------','y','y'));                                          # holt alle Zeilen aus der Doku-Datei und gibt diese aus
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+
+### pruefe, dass (nur) eine der drei Optionen benutzt wurde ###
+
+    my $numberOfParameters=0;                                                           # Zaehler fuer die eingesetzten Optionen
+    if ($namendParameters{"-u"} ne '') { $numberOfParameters++; }
+    if ($namendParameters{"-g"} ne '') { $numberOfParameters++; }
+    if ($namendParameters{"-m"} ne '') { $numberOfParameters++; }
+    if ($namendParameters{"-U"} ne '') { $numberOfParameters++; }
+    if ($namendParameters{"-G"} ne '') { $numberOfParameters++; }
+    if ($namendParameters{"-M"} ne '') { $numberOfParameters++; }
+    
+    if ($numberOfParameters > 1) { outputAndDie("ERROR: Only one of the following parameters '-u', '-g', '-m', '-U', '-G' and '-M' can be used at the same time. Use '--help' to see the options."); }
+    if ($numberOfParameters < 1) { outputAndDie("ERROR: Use one of the following parameters '-u', '-g', '-m', '-U', '-G' and '-M'. Use '--help' to see the options."); }
+
+
+### falls die Parameter '-u', '-g', '-m' ohne Namen angegeben wurden, lasse den Benutzer eine Auswahl treffen ###
+
+    my @ldapSearchArray;
+    my @ldapFoundArray; 
+    
+    if ($namendParameters{"-u"} eq 'SET')                           # falls nur -u ohne ein Loginnamen angegeben wurde
+    {
+        outputInfo("Please choose a login name to show the ldap parameters of this object.");
+        my $choise=chooseOrTestLdapItem($ldapUserBase,'','uid');            # zeige eine Auswahl vorhandener Logins und hole die DN dazu
+        ldapValueSearch($choise,\@{['uid']},'','y',\@ldapFoundArray,'','','','');   # hole den reinen Loginnamen anhand der DN
+        $namendParameters{"-u"}=$ldapFoundArray[0];                 # speichere den Loginnamen als Parameter ab
+    }
+    if ($namendParameters{"-g"} eq 'SET')                           # falls nur -g ohne ein Gruppenname angegeben wurde
+    {
+        outputInfo("Please choose a group name to show the ldap parameters of this object.");
+        my $choise=chooseOrTestLdapItem($ldapGroupBase,'','cn');            # zeige eine Auswahl vorhandener Gruppen und hole die DN dazu
+        ldapValueSearch($choise,\@{['cn']},'','y',\@ldapFoundArray,'','','','');    # hole den reinen Gruppenname anhand der DN
+        $namendParameters{"-g"}=$ldapFoundArray[0];                 # speichere den Gruppennamen als Parameter ab
+    }
+    if ($namendParameters{"-m"} eq 'SET')                           # falls nur -u ohne ein Loginnamen angegeben wurde
+    {
+        outputInfo("Please choose a machine name to show the ldap parameters of this object.");
+        my $choise=chooseOrTestLdapItem($ldapMachineBase,'','uid');         # zeige eine Auswahl vorhandener Maschinenaccounts und hole die DN dazu
+        ldapValueSearch($choise,\@{['uid']},'','y',\@ldapFoundArray,'','','','');   # hole den reinen Maschinennamen anhand der DN
+        $namendParameters{"-m"}=$ldapFoundArray[0];                 # speichere den Maschinennamen als Parameter ab
+    }
+
+
+### setze die LDAP-Suchbasis fuer Logins, Gruppen oder Maschinen-Accounts, SOWIE auch die Trennzeichen bei den Uebersichten ###
+
+    my $ldapSearchBase='';
+    my $ldapSearchValue='';
+    my $delimiterAfterEachLdapObject='';                            # Trennzeichen bei mehreren LDAP-Knoten. Wenn es leer ist wird es ignoriert. Ansonsten mit Zeilenumbruch ausgegeben.
+    @ldapSearchArray=();                                    # eine leeres Sucharray gibt alle erlaubten Werte zurueck
+
+    if ($namendParameters{"-u"} ne '') { $ldapSearchBase='uid='.$namendParameters{"-u"}.','.$ldapUserBase; @ldapSearchArray; }
+    if ($namendParameters{"-g"} ne '') { $ldapSearchBase='cn='.$namendParameters{"-g"}.','.$ldapGroupBase; @ldapSearchArray; }
+    if ($namendParameters{"-m"} ne '') { $ldapSearchBase='uid='.$namendParameters{"-m"}.','.$ldapMachineBase; @ldapSearchArray; }
+    if ($namendParameters{"-U"} ne '') { $ldapSearchBase=$ldapUserBase; @ldapSearchArray=('dn','uid','displayName','uidNumber','accountValidUntil','userPassword','sambaNTPassword','homeDirectory','loginShell','mail'); $delimiterAfterEachLdapObject=" "; }
+    if ($namendParameters{"-G"} ne '') { $ldapSearchBase=$ldapGroupBase; @ldapSearchArray=('cn','gidNumber'); $delimiterAfterEachLdapObject=" "; }
+    if ($namendParameters{"-M"} ne '') { $ldapSearchBase=$ldapMachineBase; @ldapSearchArray=('uid','homeDirectory','loginShell'); $delimiterAfterEachLdapObject=" "; }
+
+
+### starte die LDAP-Suche und gib sie aus ###
+
+    # falls die Werte im CSV-Stil ausgegeben werden sollen, setze den Feldtrenner an
+    my $delimiterCSV=''; my $getOnlyValues='n';
+    if ($namendParameters{"-c"} ne '') { $delimiterCSV=$namendParameters{"-c"}; $getOnlyValues='y'; }
+
+    # falls Option '-h' gesetzt, nutze einen anderen Hostnamen und ggf. die dazugehoehrige Passwortdatei
+    if ($namendParameters{"-h"} ne '')
+    {
+        $ldapServer=$namendParameters{"-h"};
+        $ldapAdminPasswordFile = '/root/.ldappw_'.$ldapServer;
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+            outputInfo("  DEBUG: searching values from server '$ldapServer', with the optional password file '$ldapAdminPasswordFile' (if exists) ...\n");
+        }
+    }
+
+    # starte die LDAP-Suche
+    if ($namendParameters{"-b"} eq 'SET')
+    {
+        # teste ob es eine Passwortdatei fuer das LDAP-Admin-Bind gibt und diese lesbar ist
+        my $bindPassword='';
+        open (myOpenTempFile, '<'.$ldapAdminPasswordFile);
+        while (<myOpenTempFile>)
+        {
+            chomp $_;                               # entferne evtl. Zeilenumbrueche
+            if ((length($_))>0) { $bindPassword=$_; }               # falls nun noch ein Inhalt groesser als 0 Byte in der Datei steht, dann hole den Wert und setze ihn das Passwort ein
+        }
+        close (myOpenTempFile);
+        
+        # mit dem LDAP administrator password darf man (normalerweise) mehr auslesen
+        if ($bindPassword eq '')
+        {
+            # Frage nach Passwort, da kein gueltiges in $ldapAdminPasswordFile gefunden wurde
+            $tmpOutputMessage.='Please type (optional) the LDAP administrator password to SEE MORE DETAILS. (Hidden) Password: ';
+            $bindPassword=inputHiddenText($tmpOutputMessage,'');
+        }
+        else
+        {
+            if ($namendParameters{"--debug"} eq 'SET') { outputInfo("  DEBUG: found password file '$ldapAdminPasswordFile' ...\n"); }
+        }
+        
+        # Authentifizierte LDAP-Anfrage stellen
+        ldapValueSearch($ldapSearchBase,\@ldapSearchArray,$delimiterAfterEachLdapObject,$getOnlyValues,\@ldapFoundArray,'',$ldapAdminBind,$bindPassword,$delimiterCSV); # starte die Suchanfrage mit Login und Passwort
+    }
+    else
+    {
+        ldapValueSearch($ldapSearchBase,\@ldapSearchArray,$delimiterAfterEachLdapObject,$getOnlyValues,\@ldapFoundArray,'','','',$delimiterCSV);                # starte eine anonyme Suchanfrage
+    }
+
+
+### Ausgaben falls gewuenscht sortieren ###
+
+    if (($namendParameters{"-u"} ne '')||($namendParameters{"-g"} ne '')||($namendParameters{"-m"} ne ''))                          # die Sortierung darf nicht immer erfolgen
+    {
+        @ldapFoundArray=sortLdapValues(\@ldapFoundArray);                                               # sortiere das Array
+    }
+    
+
+### Ausgabe der Daten und Beenden des Skriptes ###
+    
+    $tmpOutputMessage='';
+    foreach my $line (@ldapFoundArray)
+    {
+        $tmpOutputMessage.=$line."\n";
+    }
+    outputInfo($tmpOutputMessage);
+    
+    
+exit 0;

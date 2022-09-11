@@ -1,0 +1,183 @@
+#!/usr/bin/perl
+#
+# a perl based script to change the password on the OpenLDAP server
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+# Abhaenigkeiten unter Debian: apt install libcrack2 cracklib-runtime libterm-readkey-perl libconvert-asn1-perl libnet-ldap-perl
+
+
+# import von Modulen fuer dieses Skript
+use Term::ReadKey;                                                                      # Modul fuer versteckte Eingaben - benoetigt: "apt-get install libterm-readkey-perl"
+use Net::LDAP;                                                                          # Ergaenzung fuer LDAP-Suche einbinden - unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                       # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                                  # die zentrale Funktions-Datei einbinden
+
+
+### variable and settings ###
+my $userName='';                                                                        # Loginname des Benutzes
+$usedGui='perl-print';                                                                  # benutze die kommandozeilenbasierte Ein-/Ausgabe
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'chpasswd','--------------------','y','y'));
+        exit;
+    }
+
+
+### fremdes oder eigenes Login verwenden ? ###
+
+    if ($namendParameters{"-u"} ne '')
+    {
+        # das Passwort des Logins aus der Parameter-Uebergabe soll geaendert werden
+        $userName=$namendParameters{"-u"};
+    }
+    else
+    {
+        # das Login des aktuellen Benutzers soll geaendert werden
+        $userName=getlogin();
+    }
+
+
+### teste ob der Nutzer gesperrt ist und verhindere in diesem Fall die Passwortaenderung ###
+
+    if ($namendParameters{"-u"} ne '')
+    {
+        # die alten Werte des Account aus dem LDAP holen
+        @ldapSearchArray=('homeDirectory','loginShell'); @ldapFoundArray=();
+        my $choise=chooseOrTestLdapItem($ldapUserBase,$namendParameters{"-u"},'uid');                   # gibt die vollstaendige, lange 'DN' des LDAP-Eintrags des Accounts zurueck
+        ldapValueSearch($choise,\@ldapSearchArray,'','y',\@ldapFoundArray,'','','','');                 # Suche starten
+
+        if ( ("$ldapFoundArray[0]" eq "$lockedHomeDir") || ("$ldapFoundArray[1]" eq "$lockedLoginShell") )
+        {
+            outputAndDie("\n*** It looks like that the account is DISABLED.\n\nCurrent home directory :  $ldapFoundArray[0]\nCurrent login shell    :  $ldapFoundArray[1]\n\nPlease use the official script to ENABLE THE ACCOUNT, again. ***\n\n");
+        }
+    }
+
+
+### verhindere das versehentliche Aendern des Passwortes fuer den Nutzer root
+
+    if ($userName eq 'root')
+    {
+        outputAndDie("Changing the root password is not allowed here.\n\n*** Did you forgot the option '-u LOGIN' ? ***\n\n");
+    }
+
+
+### Eingabe bzw. Uebergabe des neuen Passwortes mit Tests und der Passwort-Hash-Erstellung ###
+
+    if ($namendParameters{"-u"} ne '')
+    {
+        $passwordText1='Please type the NEW password for the USER "'.$userName.'": ';
+        $passwordText2='Please type it again: ';
+    }
+    else
+    {
+        $passwordText1='Please type your NEW password: ';
+        $passwordText2='Please type it again: ';
+    }
+
+    if ($namendParameters{"--debug"} eq 'SET')
+    {
+        outputInfo("WARNING: Debug mode started. Your password will we later shown here !!!");
+    }
+
+    ## PASSWORT (ABFRAGEN) UND HASHES ERSTELLEN
+    if ($namendParameters{"-p"} ne '')
+    {
+        ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,$namendParameters{"-p"});
+    }
+    else
+    {    
+        if (($namendParameters{"-u"} ne '')&&($namendParameters{"-c"} ne ''))
+        {
+            # Speziallfall, einfache Kennwoerter auch erlauben
+            ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$namendParameters{"-c"},'');
+        }
+        else
+        {
+            # Normallfall, beachte die geforderte Passwort-Qualitaet
+            ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,'');
+        }
+    }
+
+    # Debug-Ausgabe der Hashes (im Debug-Modus wird auch das Klartext-PW mit ausgegeben):   
+    if ($namendParameters{"--debug"} eq 'SET')
+    {
+        $tmpOutputMessage.="This are the password hashes (for debugging):\n\n";
+        $tmpOutputMessage.="SAMBA-LM-PWD: $sambaLMPassword\n";
+        $tmpOutputMessage.="SAMBA-NT-PWD: $sambaNTPassword\n";
+        outputInfo($tmpOutputMessage."UNIX-PWD: $userPassword\n");
+    }
+    
+    print "The NEW password is accepted.\n\n";
+
+
+### LDIF-Datei temp. erstellen um Zugriffsrechte zu setzen ###
+
+    my $ldifFile='/tmp/.tmp_'.$userName.'_passwordchange_'.$thisTime.'.ldif';                           # tmp. Datei fuer das LDIF-File
+
+    open $ldifFile, '> '.$ldifFile or die("ERROR: Can't create LDIF-file: ".$ldifFile."\n"); 
+        print $ldifFile "# created: ".$thisTime."\n"; 
+    close $ldifFile;
+    chmod 0600, $ldifFile or die("ERROR: Can't chmod 600 ".$ldifFile."\n");
+    
+    my @toChange;                                                                                       # dieses 2D-Array enthaellt alle Aenderungen
+    
+    $toChange[0][0]='userPassword'; $toChange[0][1]=$userPassword;                                      # the NEW (unsecure) Lan Manager PASSWORD
+    $toChange[1][0]='sambaLMPassword'; $toChange[1][1]=$sambaLMPassword;                                # the NEW NT PASSWORD
+    $toChange[2][0]='sambaNTPassword'; $toChange[2][1]=$sambaNTPassword;                                # the NEW UNIX PASSWORD
+
+    if ($namendParameters{"-u"} ne '') 
+    {
+        # diese Parameter darf der Benutzer nicht selbst aendern
+        $toChange[3][0]='shadowInactive'; $toChange[3][1]=$shadowInactive;                              # siehe config
+        $toChange[4][0]='shadowLastChange'; $toChange[4][1]=$shadowLastChange;                          # siehe config
+        $toChange[5][0]='shadowMax'; $toChange[5][1]=$shadowMax;                                        # siehe config
+        $toChange[6][0]='shadowMin'; $toChange[6][1]=$shadowMin;                                        # siehe config
+        $toChange[7][0]='shadowWarning'; $toChange[7][1]=$shadowWarning;                                # siehe config
+        $toChange[8][0]='sambaPwdCanChange'; $toChange[8][1]=$sambaPwdCanChange;                        # siehe config
+        $toChange[9][0]='sambaPwdLastSet'; $toChange[9][1]=$sambaPwdLastSet;                            # siehe config
+        $toChange[10][0]='sambaPwdMustChange'; $toChange[10][1]=$sambaPwdMustChange;                    # siehe config
+    }
+
+    createLdifFileForChanges($ldifFile,'uid='.$userName.','.$ldapUserBase,'new',\@toChange);            # this create the LDIF-File for the changes
+
+    chmod 0600, $ldifFile;
+
+
+### send ldif (if the password is ok) ###
+
+    if ($namendParameters{"-u"} ne '') 
+    {
+        # Aufruf als LDAP-Admin (Parameter -u)
+        print "Please type the password of the LDAP-Administrator to change the password of the user '$userName' on our system.\n";
+        # if ( system ("ldapmodify -xWD $ldapAdminBind -f $ldifFile -h $ldapServer") != 0 ) { print "ERROR: The password was NOT changed.\n"; } else { print "SUCCESS: The password is changed now.\n"; }
+        if ( runLdapAdminShellCommandWithPassword('',"ldapmodify -xWD $ldapAdminBind -f $ldifFile -h $ldapServer",'/dev/null') != 0 ) { print "ERROR: The password was NOT changed.\n"; } else { print "SUCCESS: The password is changed now.\n"; }
+    }
+    else
+    {
+        # Aufruf als normaler Benutzer
+        print "Please type your OLD password to change it on our system.\n";
+        if ( system ("ldapmodify -xWD uid=$userName,$ldapUserBase -f $ldifFile -h $ldapServer") != 0 ) { print "ERROR: Your password was NOT changed.\n"; } else { print "SUCCESS: The password is changed now.\n"; }
+    }
+
+
+### loesche temp. LDIF-File und beende das Skript ###
+
+    unlink $ldifFile or die("ERROR: Can't delete ldif-File: ".$ldifFile."\n");;
+
+    exit 0;

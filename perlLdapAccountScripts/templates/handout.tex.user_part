@@ -1,0 +1,30 @@
+%
+% Copyright (c) 2022 tm-dd (Thomas Mueller)
+%
+% This code is free software. You can use, redistribute and/or
+% modify it under the terms of the GNU General Public Licence
+% version 2, as published by the Free Software Foundation.
+% This program is distributed without any warranty.
+% See the GNU General Public Licence for more details.
+%
+
+\begin{letter}
+
+Dear \textbf{FULLNAME},
+
+you can use our computers and the wireless network \textbf{EXAMPLE} to work and stay connected to the internet. Please use the following login and password to access our services:
+
+\dots
+
+\begin{tabular} {l l}
+\hspace*{10pt} your login / username:  & \fbox{LOGIN}\\
+\hspace*{10pt} your password:  & \fbox{PASSWORD}
+\end{tabular}
+
+\dots
+
+Sincerely,
+
+ACME AG
+
+\end{letter}

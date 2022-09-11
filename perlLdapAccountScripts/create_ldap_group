@@ -1,0 +1,132 @@
+#!/usr/bin/perl
+#
+# perl based script to create a ldap group
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                       # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                      # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                          # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='CREATE LDAP GROUP';                                           # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                   # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                              # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                              # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'create_ldap_group','--------------------','y','y'));      
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+    # lese u.a. globale GID, GIDNumbers und SambaSIDs ein (nach @listUsedGid @listUsedGidNumber @listUsedSambaSID)
+    readSystemIDs();
+    
+
+### Erstelle Listen fuer freie nutzbare IDs
+    
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo($tmpOutputMessage."\nsearching for the new IDs on the LDAP server ..."); }
+
+    # Listen erzeugen
+    my @listFreeGIDNumbers;
+    my @listFreeSambaUIDs;
+
+    # SEMANTIK des AUFRUF: searchFreeIDs($numberNeededIDs,$minID,$maxID,$typOfIDs,\@listUsedIDs,\@listFreeIDs);
+    searchFreeIDs(1,$firstGidNumber,$lastGidNumber,'Unix-GIDs',\@listUsedGidNumber,\@listFreeGIDNumbers);           # freie ID fuer Unix-GID der Gruppe holen
+    searchFreeIDs(1,$firstSambaUID,$lastSambaUID,'Samba-SIDs',\@listUsedSambaSID,\@listFreeSambaUIDs);          # freie ID fuer Samba-GID der Gruppe holen
+    
+
+### WERTE ZUR GRUPPE ABFRAGEN UND ERSTELLEN ###
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo($tmpOutputMessage."\nInput and/or validate the group name."); }
+
+    if ($namendParameters{"-n"} ne '')
+    {   
+        $groupName=testSimpleChars($namendParameters{"-n"},'group');                            # Gruppennamen aus Parameter holen und pruefen
+        $groupName=testGid($groupName);                                         # pruefe den Gruppennamen (gid) und passe es ggf. an
+    }
+    else {
+        $groupName=inputText('name of group: ');                                    # Eingabe des gewuenschten Gruppennamens
+        $groupName=testSimpleChars($groupName,'group');                                 # pruefe den Gruppennamen (gid) und passe es ggf. an
+        $groupName=testGid($groupName);                                         # pruefe den Gruppennamen (gid) und passe es ggf. an
+    }
+
+
+### erstelle LDIF-Datei
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo($tmpOutputMessage."\ncreating the LDIF file to create the group later ..."); }
+
+    # LDIF-Ausgabe-Datei schreiben oeffnen
+    open neueDatei, '>'.$ldifTempFilename or outputAndDie("ERROR: Could not create the file '".$ldifTempFilename."'.");
+
+    # den Kopf der LDIF-Datei erzeugen
+    print neueDatei $ldifAddHeader;
+
+    # LDIF Eintraege schreiben
+    print neueDatei "# GROUP: ".$groupName."\n#\n";                                     # Kommentar setzen
+    print neueDatei "dn: cn=".$groupName.",".$ldapGroupBase."\n";                               # die dn-Zeile (eindeutiger LDAP-Pfad zum Objekt)
+    print neueDatei "cn: ".$groupName."\n";                                         # der Name (GID)
+    print neueDatei "description: Posix- und SAMBA-Gruppe $groupName\n";                            # optionale Beschreibung der Gruppe
+    print neueDatei "gidNumber: ".$listFreeGIDNumbers[0]."\n";                              # die UNIX-GID
+    print neueDatei "objectClass: top\n";                                           # Standardwert fuer alle Gruppen-Accounts
+    print neueDatei "objectClass: posixGroup\n";                                        # Standardwert fuer alle Gruppen-Accounts -> "ist Unix-Gruppe"
+    print neueDatei "objectClass: sambaGroupMapping\n";                                 # Standardwert fuer alle Gruppen-Accounts -> "hat Samba-Gruppenmapping"
+    print neueDatei "sambaGroupType: 2\n";                                          # Art der Samba-Gruppe (2 = Domaingruppe; 5 = builtin-Gruppe)
+    print neueDatei "sambaSID: ".$sambaServerSID."-".$listFreeSambaUIDs[0]."\n";                        # Samba-SID der Gruppe
+
+
+    # LDIF-Ausgabe-Datei schliessen
+    close neueDatei;
+
+
+### Daten zum LDAP hinzufuegen
+
+    # LDAP-Daten hinzufuegen (um die Accounts anzulegen) mit einem LDAP-Admin-Passwort
+    $tmpOutputMessage.="Please type the LDAP administartor password to create the group '".$groupName."' OR stop that with a wrong password.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapadd -x -D $ldapAdminBind -h $ldapServer -W -f $ldifTempFilename",'');
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n"); 
+    
+
+### merke die eingesetzten IDs in den Sperrlisten
+
+    if ($rememberAndCheckOldIds eq 'y') 
+    {
+        system "echo '".$listFreeSambaUIDs[0]."' >> ".$fileDeniedSambaUID;                      # Samba-SIDs duerfen nicht doppelt verwendet werden. Es gibt keine Unterscheidung im Einsatz fuer Gruppen und Benutzer.
+        system "echo '".$listFreeGIDNumbers[0]."' >> ".$fileDeniedGidNumbers;                       # GIDs duerfen natuerlich auch nicht doppelt genutzt werden, es seih denn man benoetigt zwei Namen fuer die gleichen Rechte.
+    }
+
+
+### NSCD-Cache bei Gruppendaten neu einlesen lassen. NOETIG, da sonst Gruppen-Konfigurationen erst nach einiger Zeit bzw. Neustart korrekt nutzbar sind.
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo ("reloading the local nscd for groups ...\n"); }
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group"; }                              # auf den LDAP-Clients sollte "/usr/sbin/nscd -i group" auch regelm. laufen, falls man den nscd nicht entsp. konfiguriert
+
+
+exit 0;

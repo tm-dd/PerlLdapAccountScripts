@@ -1,0 +1,167 @@
+#!/usr/bin/perl
+#
+# start script to create ldap backups as ldif files
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                       # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                      # die zentrale Funktions-Datei einbinden
+
+# um Base64-kodierte Daten dekodieren zu koennen, folgendes einbinden
+use MIME::Base64;
+
+
+### variables and defaults ###
+
+    our $windowTitle='MAKE LDAP BACKUP';                            # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                   # als Zwischenspeicher fuer Ausgaben
+    my $ldapConditions = '(objectclass=*)';                         # Abfrage-Bedingungen fuer die LDAP-Anfrage - '(objectclass=*)' holt alles
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }              # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }              # Eingabe-Modus per Dialog
+    if ($namendParameters{"-d"} ne '') { $backupDirectory=$namendParameters{"-d"}; }    # Verzeichnisname fuer die neuen Dateien
+    if ($namendParameters{"-b"} ne '') { $ldapBackupFile=$namendParameters{"-b"}; }     # Dateiname LDIF-Backups
+    if ($namendParameters{"-j"} ne '') { $userPasswordFile=$namendParameters{"-j"}; }   # Dateiname fuer die 'John-the-Ripper"-kompatible Datei
+
+    # erzwinge Ausgabe im 'dialog'-Stil (Grund: in runLdapAdminShellCommandWithPassword() wird sonst das LDIF nach /dev/null geschrieben)
+    $usedGui='dialog';
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'make_ldap_backup','--------------------','y','y'));
+        exit;
+    }
+
+
+### Test ob Verzeichnis "backups" existiert ###
+
+    if (`test -d $backupDirectory || echo error` ne '') { outputAndDie("Could not find the directory '$backupDirectory'."); }
+
+
+### DEBUG-Ausgabe was passieren wird ###
+
+    if ($namendParameters{"--debug"} eq 'SET')
+    { 
+        $tmpOutputMessage="Now I try to fetch the LDAP informations from the server: '$ldapServer' from the DN '$ldapBase' without stopping the service.\n\n";
+        $tmpOutputMessage.="To export the WHOLE LDAP informations stop the service and run as root the command 'slapcat -l ldap_backup_file.ldif'.\n";
+        outputInfo ($tmpOutputMessage."The following command can install a FULL LDAP export as root: 'slapadd -l ldap_backup_file.ldif' ");
+    }
+
+
+### ERSTELLE nun das LDAP-Backup mittels ldapsearch ###
+
+    $tmpOutputMessage.="Please type the LDAP administartor password to create a new backup from the LDAP DN: '".$ldapBase."'.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapsearch -x -W -D '$ldapAdminBind' -h $ldapServer -b '$ldapBase' '$ldapConditions'",$backupDirectory.$ldapBackupFile);
+
+    # loesche unliebsame Zeilen aus dem Backup
+    system 'set -x; /bin/grep -v "^Enter LDAP Password:\|^search:\|^result:" '.$backupDirectory.$ldapBackupFile." > ".$backupDirectory.$ldapBackupFile.".tmp";
+    system "set -x; /bin/mv ".$backupDirectory.$ldapBackupFile.".tmp ".$backupDirectory.$ldapBackupFile;
+
+    # Erfolgsausgabe
+    outputInfo("The LDAP backup was saved to the file '".$backupDirectory.$ldapBackupFile."' now.");
+
+
+## LDAP-JOHNFILE erstellen (spezieller Auszug aus dem LDAP-Backup)
+
+    if ($namendParameters{"--debug"} eq 'SET')
+    {
+        $tmpOutputMessage="Now create the file '".$backupDirectory.$userPasswordFile."' with the logins and password hashes (to use e.g. with 'John the Ripper').\n";
+        outputInfo($tmpOutputMessage."This will need to reconvert the base64 coded informations.\n");
+        $tmpOutputMessage="Locking for the accounts ...\n";
+    }
+
+    open (openfile, "< ".$backupDirectory.$ldapBackupFile) or outputAndDie("Could not read the file: ".$backupDirectory.$ldapBackupFile.".");
+    open (openfile2, "> ".$backupDirectory.$userPasswordFile) or outputAndDie("Could not write the file: ".$backupDirectory.$userPasswordFile.".");
+
+    # durchlaufe gesammtes LDIF-File
+    while (<openfile>)
+    {
+        chomp ($newLine=$_);                                # Zeilenendezeichen entfernen aus Variablen
+
+        # Fall "dn:" gefunden
+        if (((length($newLine))>0)&&($newLine=~/^dn:/))                 # suche neue Objekte
+        {
+            $uid=''; $decryptPassword='';                       # alte Werte zuruecksetzen, da neues Objekt gefunden
+        }
+
+        # Fall "uid:" gefunden
+        if (((length($newLine))>0)&&($newLine=~/^uid:/))                # suche Loginnamen
+        {
+            $posAfterLastColon = ((index $newLine,"uid: ")+5);          # Position im String nach der Zeichenkette "uid: "
+            $lengthRestTerm=((length $newLine) - ($posAfterLastColon));     # Laenge der restlichen Zeile
+            $uid = substr $newLine,$posAfterLastColon,$lengthRestTerm;      # restliche Zeichenkette - ohne "uid: "
+        }
+
+        # Fall "userPassword::" gefunden
+        if (((length($newLine))>0)&&($newLine=~/^userPassword::/))          # suche Benutzer-Passwoerter
+        {
+            # suche nach neuer UNIX-PASSWORT-ZEILE
+            $posAfterLastColon = ((index $newLine,"userPassword:: ")+15);       # Position im String nach der Zeichenkette "userPassword:: "
+            $lengthRestTerm=((length $newLine) - ($posAfterLastColon));     # Laenge der restlichen Zeile
+            $password = substr $newLine,$posAfterLastColon,$lengthRestTerm;     # restliche Zeichenkette - ohne "userPassword:: "
+            $decryptPasswordString = decode_base64($password);          # Passwort dekodieren (es ist BASE64 codiert)
+
+            # Tests (und Kuerzen) der Zeichenketten nach Gross- UND Kleinschreibung sind hier wegen index() leider doppelt noetig
+
+            # CRYPT-kodierte Passwoerter abspeichern
+            if ($decryptPasswordString=~/^{CRYPT}/)
+            {
+                $posAfterCrypt = ((index $decryptPasswordString,"{CRYPT}")+7);              # Position im String nach der Zeichenkette "{CRYPT}"
+                $lengthRestTerm = ((length $decryptPasswordString) - ($posAfterCrypt));         # Laenge der restlichen Zeile
+                $decryptPassword = substr $decryptPasswordString,$posAfterCrypt,$lengthRestTerm;    # restliche Zeichenkette - ohne "{CRYPT}"
+            }
+            if ($decryptPasswordString=~/^{crypt}/)
+            {
+                $posAfterCrypt = ((index $decryptPasswordString,"{crypt}")+7);              # Position im String nach der Zeichenkette "{crypt}"
+                $lengthRestTerm = ((length $decryptPasswordString) - ($posAfterCrypt));         # Laenge der restlichen Zeile
+                $decryptPassword = substr $decryptPasswordString,$posAfterCrypt,$lengthRestTerm;    # restliche Zeichenkette - ohne "{CRYPT}"
+            }
+
+            # SSHA-kodierte Passwoerter abspeichern - ACHTUNG: nicht alle JOHN-Versionen koennen diese cracken
+            if ($decryptPasswordString=~/^{SSHA}/)
+            {
+                $posAfterCrypt = ((index $decryptPasswordString,"{SSHA}")+6);               # Position im String nach der Zeichenkette "{SSHA}"
+                $lengthRestTerm = ((length $decryptPasswordString) - ($posAfterCrypt));         # Laenge der restlichen Zeile
+                $decryptPassword = substr $decryptPasswordString,$posAfterCrypt,$lengthRestTerm;    # restliche Zeichenkette - ohne "{SSHA}"
+            }
+            if ($decryptPasswordString=~/^{ssha}/)
+            {
+                $posAfterCrypt = ((index $decryptPasswordString,"{ssha}")+6);               # Position im String nach der Zeichenkette "{ssha}"
+                $lengthRestTerm = ((length $decryptPasswordString) - ($posAfterCrypt));         # Laenge der restlichen Zeile
+                $decryptPassword = substr $decryptPasswordString,$posAfterCrypt,$lengthRestTerm;    # restliche Zeichenkette - ohne "{SSHA}"
+            }
+        }
+
+        # ein neuer Eintrag aus "uid" und "userPassword" ist nun vorhanden und kann nun gespeichert werden
+        if (($uid ne '')&&($decryptPassword ne ''))
+        {
+            if ($namendParameters{"--debug"} eq 'SET') { $tmpOutputMessage.="\n+++ found login and password: -> $uid:$decryptPassword"; }
+            print openfile2 "$uid:$decryptPassword\n";                          # Eintrag in Datei schreiben
+            $uid=''; $decryptPassword='';                                   # alte Werte zuruecksetzen
+        }
+
+    }
+
+    close openfile2;
+    close openfile;
+
+    system "chmod 700 $backupDirectory";                                        # Zugriffsrechte des Verzeichnisses einschraenken (zur Sicherheit)
+
+    # Ausgabe der Funde im DEBUG-Modus
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo($tmpOutputMessage); }
+
+    outputInfo("The new file '".$backupDirectory.$userPasswordFile."' was written and can use with 'John the Ripper' (e.g. '.../john ".$backupDirectory.$userPasswordFile."') to check the password security.\n");
+
+    exit 0;

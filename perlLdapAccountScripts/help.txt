@@ -1,0 +1,581 @@
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+************************************************************************
+* This ist the help file of the LDAP scripts "perlLdapAccountScripts". *
+************************************************************************
+
+    In this file you can read the options of the ldap scripts. The scripts can be use with or without this parameters.
+    All settings which your are not given over the options, the scripts will ask you that interactive.
+    
+    If you are not familiar with this scripts your can use the script "ldap_start" OR start the scripts
+    with the parameter '--help' to see all options.
+    
+    Please be carefull by editing the file, because the parameter "--help" of the scripts read this file, to give the output.
+    Every '--help' section of the scripts starts with his name here and ends with a twenty '-'.
+
+
+Now are following the options of all ldap scripts:
+
+--------------------
+
+ldap_start
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Tells a list of possible ldap commands.
+    
+Example:
+
+    ldap_start -i c --debug
+
+--------------------
+
+chpasswd
+
+    -p   [0..Z]      the new cleartext password
+    -u   [0..Z]      login of the user (only for system administrators)
+    -c   [0..9]      set password quality (only for system administrators)
+
+    --debug          debug mode (shows the given password and the password hashes)
+    --help           print this help
+
+Short description:
+
+    This script allows to change the password of unix accounts.
+
+Example:
+
+    chpasswd -u sonne -p 'W3lcome_PW' --debug
+
+What's doing the command ?:
+
+    - let the user input a new password, twice
+    - check the password about our security rules
+    - create the necessary password hashes and a LDIF file for sending to our LDAP server
+    - send the new password hashes to our LDAP server, by typing the old user password or the administrator password
+    
+--------------------
+
+create_ldap_user
+
+    -f   [0..Z]      firstname
+    -s   [0..Z]      surname
+    -u   [0..Z]      user name (login)
+    -p   [0..Z]      cleartext password
+    -q   [0..9MGT]   quota cloud [1..X][T|G|M]
+    -w   [0..9]      numbers of allowed parallel wireless clients [1..n]
+    -m   [0..Z]      email address (this option can be forbidden in the configuration file)
+    -d   [0..Z]      (optional) set an alternated full name (displayName) for the user
+    -n   [0..Z]      (optional) notes (as description) to the account
+    -a   [0..Z]      (optional) use an alternated ldap user base
+    
+    -i   [cd]        input mode (c "command line" or d "dialog")
+    --onlyUnixPw     store only the Unix password hashes
+    --onlySambaPw    store only the Samba password hashes
+    --noHomeAndShell don't use home directory, shell and don't add to groups
+    --unchangeGroups don't put the user to the groups of active users          
+    --debug          debug mode
+    --help           print this help
+
+Short description:
+
+    This command will create a new unix account.
+
+Examples:
+
+    create_ldap_user -f Susi -s Sonnenschein -u sonne -q "20 GB" -w 3 -m susi@meine-sonne.de -p TryMe.N0w -i c
+
+        Configuration of the new user:
+        
+        first name: Susi
+        surname: Sonnenschein
+        full name: Susi Sonnenschein
+        login: sonne
+        UID number: 10082
+        Samba SID: S-1-5-21-60479668-3593310089-1371158179-12913
+        email: susi@meine-sonne.de
+        quota cloud space: 20 GB
+        parallel wireless logins: 3
+        
+        Are these values correct ? [y/n] :y
+    ...
+
+    ---
+
+    create_ldap_user -u "wilma@regelwald.de" -d "Wilma Wolke (wilma@regelwald.de)" -a "ou=external-users-cloud,ou=members,dc=example,dc=org" --noHomeAndShell --onlyUnixPw -n "Nextcloud only test account for a cooperation with Susi Sonne."
+    
+        first name: Wilma
+        surname: Wolke
+        quota [50G]: 
+        numbers of parallel wireless logins [3]: 
+        
+        Configuration of the new user:
+        
+        first name: Wilma
+        surname: Wolke
+        full name: Wilma Wolke (wilma@regelwald.de)
+        login: wilma@regelwald.de
+        UID number: 10083
+        Samba SID: S-1-5-21-60479668-3593310089-1371158179-10063
+        email: wilma@regelwald.de
+        quota cloud space: 50G
+        parallel wireless logins: 3
+        
+        Are these values correct ? [y/n] : y
+        ...
+
+--------------------
+
+disable_ldap_users
+
+    -u    [0..Z,]   (list of) login(s) to disable
+    
+    -i   [cd]        input mode (c "command line" or d "dialog")
+    --unchangeGroups don't delete the user from the groups of active users
+    --debug          debug mode
+    --help           print this help
+
+Short description:
+
+    This will disable an unix account.
+    
+Example:
+
+    disable_ldap_users -u sonne,mond,sternchen -i c --debug
+
+--------------------
+
+enable_ldap_user
+
+    -u   [0..Z]      user name (login)
+    -t   [on]        use the old (o) password or use a new (n) one
+    -p   [0..Z]      new cleartext password
+    
+    -i   [cd]        input mode (c "command line" or d "dialog")
+    --unchangeGroups don't put the user to the groups of active users
+    --debug          debug mode
+    --help           print this help
+
+Short description:
+
+    This will be enable a disabled unix account.
+
+Example:
+
+    enable_ldap_user -u sonne -t o -i c --debug
+
+--------------------
+
+create_ldap_conference_users
+
+    -f    [0..Z/]   filename of login list
+    -n    [0..Z]    name of conference
+    -p    [0..?]    password for all users
+    -r              use random password for every user
+    -c    [0..n]    colum for the login names (use '0' for the last colum of each line)
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    It creates user accounts from a CSV list of names. Secondly, it creates a new unix group with all this new unix accounts.
+
+Example:
+
+    create_ldap_conference_users -f /root/list_of_new_users.txt -n conference1 -r -c 0
+
+Notes:
+
+    The list of the conference should be a text list like the following example:
+    
+        firstname1 midname1 midname2 surename1 login1
+        firstname2 surename2 login2
+        ...
+        firstnameX midnameX surenameX loginX
+    
+    Try "dos2unix list_of_new_users.txt" to fix "unvisible" problems in the list of the conference users.
+
+--------------------
+
+create_ldap_group
+
+    -n    [0..Z]    name of group
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Create a unix group.
+
+Example:
+
+    create_ldap_group -n restricted -i c --debug
+
+--------------------
+
+create_ldap_machine
+
+    -n    [0..Z]    name of machine
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Create a Samba machine account.
+
+Example:
+
+    create_ldap_machine -n wts -i c --debug
+
+--------------------
+
+delete_ldap_user
+
+    -u   [0..Z]     user name (login)
+    -h    [dk]      d=delete or k=keep the home directory
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --unchangeGroups don't delete the user from the groups of active users
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Delete a unix account.
+
+Example:
+
+    delete_ldap_user -u sonne -h k -i c --debug
+
+--------------------
+
+delete_ldap_machine
+
+    -n    [0..Z]    name of machine
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Delete a Samba machine account.
+
+Example:
+
+    delete_ldap_machine -n wts -i c --debug
+
+--------------------
+
+delete_ldap_group
+
+    -n    [0..Z]    name of user
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Delete a unix group.
+
+Example:
+
+    delete_ldap_group -n restricted -i c --debug
+
+--------------------
+
+delete_ldap_conference_users
+
+    -n    [0..Z]    name of conference (group)
+    -h    [dk]      d=delete or k=keep the home directory
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Delete all accounts of the chosen unix group which was created for the conference.
+
+Example:
+
+    delete_ldap_conference_users -n conference1 -h d -i c --debug
+    
+--------------------
+
+add_ldap_users_to_groups
+
+    -g    [0..Z]    (list of) groups(s) for the login(s)
+    -u    [0..Z,]   (list of) login(s) which should put to the group(s)
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Put one or more user accounts into one or more unix groups.
+
+Example:
+
+    add_ldap_users_to_groups -g group1,group2 -u member1,member2,member3 -i c --debug
+    
+--------------------
+
+delete_ldap_users_from_groups
+
+    -g    [0..Z]    (list of) groups(s) for the login(s)
+    -u    [0..Z,]   (list of) login(s) which should remove from the group(s)
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Delete one or more user accounts from one or more unix groups.
+
+Example:
+
+    delete_ldap_users_from_groups -g group1,group2 -u member1,member2,member3 -i c --debug
+    
+--------------------
+
+show_ldap_details
+
+    -u    [0..Z]    name of existing ldap user to view (name can also be choose)
+    -g    [0..Z]    name of existing ldap group to view (name can also be choose)
+    -m    [0..Z]    name of existing ldap machine to view (name can also be choose)
+    -U              show some values of all ldap users 
+    -G              show some values of all ldap groups
+    -M              show some values of all ldap machines
+
+    -c    [0..Z]    get the results als CSV lines with this field delimiter      
+    
+    -h    [0..Z]    fetch the LDAP values from this different server (usefull to compare ldap master and slaves)
+    -b              bind als Ldap-Administartor to view more informations (like password hashes)
+
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    It fetch and print informations from the LDAP server.
+
+Example:
+
+    show_ldap_details -u susi -i c -b
+    
+--------------------
+
+make_ldap_backup
+
+    -b    [0..Z]    name for the new ldif backup file
+    -j    [0..Z]    name for the 'John the Ripper' file
+    -d    [0..Z/]   path of the directory for the two files (ldif, john)
+    
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    This will create a backup of the configured LDAP server tree and write a list of login and passwort hashes, for internal tests of the security.
+
+Example:
+
+    make_ldap_backup -d /root/ldap_backup_today/ -b ldap_full.ldif -j john.txt -i c --debug
+
+--------------------
+
+import_ldap_backup
+
+    -b    [0..Z]    name for the ldif backup file to install
+    
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    Can be used to import a LDAP backup.
+
+Example:
+
+    import_ldap_backup -b /root/ldap_backup_today/ldap_full.ldif -i c --debug
+
+--------------------
+
+migrate_local_to_ldap_users
+
+    -up    [0..Z/]   path and name of the passwd file
+    -us    [0..Z/]   path and name of the shadow file
+    -sp    [0..Z/]   path and name of the smbpasswd file
+    -su    [0..Z/]   path and name of the Samba users file (create with: "pdbedit -L -v > FILE.txt"), needed for Samba account flags and Samba SIDs
+    -n     [0..Z/]   the filename for a text file with a list of users (every account is written in a serveral line) which should NOT migrate to LDAP 
+    -f     [0..Z/]   the filename for the new LDIF file (will be created with this script)
+    -g     [0..Z,-]  "-" for no group OR a list of new groups with all active users (all accounts with password will be inside in all of the groups)
+    --dctg           Don't Create The Groups. That means that the groups from the option "-g ..." will not new created here. But all active users will be put to this groups by the migration process.
+    
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    This will migrate the local accounts from /etc/passwd and the samba 3 server into the LDAP server.
+
+Example Migration:
+
+    FIRST: BACKUP EXISTING LDAP-USER-TREE !!!
+    
+    WARNING: On production systems with ldap master and slave servers, prevent the connection from the master to the slaves DURING the migration process.
+             The steps on the master: stop ldap, block ldap in the firewall, start ldap, migrate the accounts, check the migration, allow ldap sync in the firewall
+             
+             If you want to use the option '-g' to create one or more groups with all active users, it will be better now to migrate the groups at first.
+
+    CLEAN THE LDAP TREE AND IMPORT A EMPTY ONE:
+
+        If you use the option '-g', please remove these groups, now. Otherwise this groups can't be created and filled with the users, later.
+
+        ldap:~# ldapdelete -D cn=ldapadmin,dc=example,dc=org -W -x -r ou=users,ou=members,dc=example,dc=org -h ldapserver 
+
+        ldap:~# cat users_empty.ldif
+        
+        dn: ou=users,ou=members,dc=example,dc=org
+        objectClass: top
+        objectClass: organizationalUnit
+        ou: users
+                
+        ldap:~# ldapadd -xWD cn=ldapadmin,dc=example,dc=org -f users_empty.ldif -h ldapserver
+
+    CREATE AND SAVE LOCAL FILES:
+
+        unixserver:~   # mkdir /tmp/migration_`date '+%F'`
+        unixserver:~   # cd /tmp/migration_`date '+%F'`
+        unixserver:... # chmod 700 ./
+        unixserver:... # cp /etc/passwd /etc/shadow /etc/samba/smbpasswd ./
+        unixserver:... # pdbedit -L -v > ./smbusers.txt
+        unixserver:... # grep -v ':/home/\|:/data/\|:/dev/\|:/scratch/\|:/usr/local/' /etc/passwd | awk -F ':' '{ print $1 }' > ./system_accounts.txt
+        unixserver:... # less ./system_accounts.txt 
+        unixserver:... # scp -r /tmp/migration_`date '+%F'` login@ldap:
+
+    CREATE AND IMPORT LDIF FILE:
+    
+        ldap:... # .../migrate_local_to_ldap_users -up passwd -us shadow -sp smbpasswd -su smbusers.txt -n system_accounts.txt -g allusers --dctg -f migrated_accounts.ldif
+    
+    CHECK THE IMPORT FOR ERRORS AND PROBLEMS AND (IF EXISTS) MIGRADE AGAIN WITH CORRECT FILES. ALSO CHECK THE NUMBER OF MIGRATED ACCOUNTS.
+        For example an account in passwd without an line in shadow, makes problems becase LDAP needs for empty passwords a value in 'shadowMax', also.
+    
+    USE "migrate_ldap_to_local_users" TO CREATE passwd AND shadow FILES FROM LDAP TO CHECK THE MIGRATION WITH COLOR BASED "diff"-PROGAMS.
+    
+    CHECK SOME ACCOUNTS BY HAND.
+
+    
+Tipps fuer die Liste nicht zu migrierender Accounts:
+
+    - Um eine erste Liste von Systemaccounts zu erstellen, kann man den folgende Aufruf benutzen: grep ':\*:\|:\!:' /etc/shadow | awk -F ':' '{ print $1 }' > /root/temp_list_of_system_only_users.txt
+    - Auch lokale Accounts wie "root" sollte man, zusmammen mit den Systemaccounts, in der Liste der nicht zu migrierenden Benutzer schreiben.
+    - Das folgende Kommando kann auch helfen einige nicht zu migrierende Accounts zu finden: grep -v '/home/' /etc/passwd
+    - Sollen fehlerhaft konfiguriere Accounts migriert werden, kommt es oft zum Abbruch beim Import der Daten. Entweder man beseitigt die Fehler vor der Migration oder schliesst die Accounts von der Migration anhand dieser Liste aus.
+
+--------------------
+
+migrate_local_to_ldap_groups
+
+    -g    [0..Z/]   path and name of the group file (e.g. /etc/group)
+    -s    [0..Z/]   path and name of the gshadow file (e.g. /etc/gshadow)
+    -n    [0..Z/]   the filename for a text file with a list of groups (every name is written in a serveral line) which should NOT MIGRATE to LDAP 
+    -f    [0..Z/]   the filename for the new LDIF file (will be created with this script)
+    
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    This will migrate the local groups from /etc/group into the LDAP server.
+    
+Example Migration:
+
+    FIRST: BACKUP EXISTING LDAP-GROUP-TREE !!!
+    
+    WARNING: On production systems with ldap master and slave servers, prevent the connection from the master to the slaves DURING the migration process.
+             The steps on the master: stop ldap, block ldap in the firewall, start ldap, migrate the accounts, check the migration, allow ldap sync in the firewall
+             
+    If you used "migrate_local_to_ldap_users" with the option "-g" to create groups with all active users, you should not delete these groups now.
+
+    MAYBE: CLEAN THE LDAP TREE AND IMPORT A EMPTY ONE:
+
+        ldap:... # ldapdelete -D cn=ldapadmin,dc=example,dc=org -W -x -r ou=groups,ou=members,dc=example,dc=org -h ldapserver
+        
+    MAYBE: CLEAN THE LDAP TREE AND IMPORT A EMPTY ONE:
+
+        ldap:... # cat groups_empty.ldif 
+        dn: ou=groups,ou=members,dc=example,dc=org
+        objectClass: top
+        objectClass: organizationalUnit
+        ou: groups
+        
+        ldap:... # ldapadd -xWD cn=ldapadmin,dc=example,dc=org -f groups_empty.ldif -h ldapserver
+
+    CREATE AND SAVE LOCAL FILES:
+
+        unixserver:~ # mkdir /tmp/migration_`date '+%F'`
+        unixserver:~ # chmod 700 /tmp/migration_`date '+%F'`
+        unixserver:~ # cp /etc/group /etc/gshadow /tmp/migration_`date '+%F'`
+        unixserver:~ # grep ':$' /etc/group | awk -F ':' '{ print $1 }' | grep -v '^codine$' > /tmp/migration_`date '+%F'`/system_groups.txt 
+        unixserver:~ # vim /tmp/migration_`date '+%F'`/system_groups.txt                 # change the list by hand
+        unixserver:~ # echo 'dialout' >> /tmp/migration_`date '+%F'`/system_groups.txt   # vielleicht auch 'bin' ?
+        unixserver:~ # scp -r /tmp/migration_`date '+%F'` login@ldap:
+
+    CREATE AND IMPORT LDIF FILE (you can use "/dev/null" for ignoring "/etc/gshadow"):
+
+        ldap:... # .../migrate_local_to_ldap_groups -g group -s /dev/null -n system_groups.txt -f migrated_groups.ldif
+
+    CHECK THE IMPORT FOR ERRORS AND PROBLEMS AND (IF EXISTS) MIGRADE AGAIN WITH CORRECT FILES. ALSO CHECK THE NUMBER OF MIGRATED GROUPS.
+
+    USE "getent group > new_group_file" TO CREATE A FILES FROM LDAP AND CHECK THE MIGRATION WITH COLOR BASED "diff"-PROGAMS.
+    
+    CHECK SOME GROUPS BY HAND.
+    
+--------------------
+
+migrate_ldap_to_local_users
+
+    -p    [0..Z/]   path and name of the passwd file
+    -s    [0..Z/]   path and name of the shadow file
+    
+    -i   [cd]       input mode (c "command line" or d "dialog")
+    --debug         debug mode
+    --help          print this help
+
+Short description:
+
+    This will migrate the LDAP user accounts to local account files like /etc/passwd and /etc/shadow. Not all password hashes can be migrated.
+
+Example:
+
+    migrate_ldap_to_local_users -p /etc/passwd.test -s /etc/shadow.test -i c --debug
+
+--------------------

@@ -1,0 +1,440 @@
+#!/usr/bin/perl
+#
+# a perl based script to migrate groups from /etc/group to OpenLDAP 
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                       # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                      # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                          # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+
+    our $windowTitle='MIGRATE GROUPS TO LDAP';                                      # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                   # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                              # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                              # Eingabe-Modus per Dialog
+
+    our @fullGroupList=();                                                  # dieses Array hat spaeter die Kombinationen aller eingelesenen Werte
+    
+        #######################################
+        ### AUFBAU DES ARRAYS @fullGroupList ###
+        #
+        # array[zeile][0]:  Name der Gruppe (aus /etc/group)
+        # array[zeile][1]:  Passwort-Hash ODER (ein 'x' als Kennzeichen, dass Passwort in /etc/gshadow steht) ODER (ein '*' oder '!' dass es kein Passwort gibt)
+        # array[zeile][2]:  Nummer der Gruppen-ID (GID number)
+        # array[zeile][3]:  Teilnehmer der Gruppe (mit Komma getrennt)
+        # array[zeile][4]:  Name der Gruppe (aus GSHADOW)
+        # array[zeile][5]:  Passwort-Hash (bzw. '!' oder '*' fuer keins) der Gruppe -> benutzbar als Gruppenferner Account mit: "newgrp groupname" und dem Passwort
+        # array[zeile][6]:  Gruppenverwalter-Login -> er darf genauso wie root mittels "gpasswd groupname" das Passwort der Gruppe setzen -> AKTUELL LEIDER HIER NICHT MIGRIERBAR
+        # array[zeile][7]:  Teilnehmer der Gruppe (mit Komma getrennt) wie in /etc/group
+        #
+        #######################################
+        
+    
+### AUSGABE der Doku bzw. --help ###
+
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'migrate_local_to_ldap_groups','--------------------','y','y'));
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+    # lese u.a. globale GID, GIDNumbers und SambaSIDs ein (nach @listUsedGid @listUsedGidNumber @listUsedSambaSID)
+    readSystemIDs();
+    
+    # Warung ausgeben, dass man die zu importieren Dateien vorher filtern sollte
+    outputInfo("!!! WARNING: Are you check your group lists for this migration and delete system only groups, remove invalid characters ... ? !!!\n");
+
+
+### Erstelle Listen fuer freie nutzbare IDs
+    
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo($tmpOutputMessage."\nsearching for a new SID on the LDAP server ..."); }
+
+    # Liste mit freien Samba-SID erzeugen
+    my @listFreeSambaUIDs;
+
+
+### DATEINAMEN ABFRAGEN ODER AUS PARAMETER HOLEN ###
+
+
+    ## GROUP FILE
+    if ($namendParameters{"-g"} ne '') {
+        # Datei aus dem Parameter holen
+        $groupFile=$namendParameters{"-g"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $groupFile=selectFilename("Please choose the group file (/etc/group) for importing.",'/etc/','y');
+    }
+
+    
+    ## GGSHADOW FILE
+    if ($namendParameters{"-s"} ne '') {
+        # Datei aus dem Parameter holen
+        $gshadowFile=$namendParameters{"-s"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $gshadowFile=selectFilename("Please choose the gshadow (/etc/gshadow) file for importing, or an empty text file to ignore this.",'/etc/','y');
+    }
+
+
+    ## Textdatei mit den Gruppennamen, die NICHT migriert werden sollen (z.B. die Gruppe 'root')
+    if ($namendParameters{"-n"} ne '') {
+        # Datei aus dem Parameter holen
+        $doNotMigrateFile=$namendParameters{"-n"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $doNotMigrateFile=inputText('Please type full path to a plain text list of groups, which should exclude from the migration process (or an empty file) : ');
+    }
+    
+
+    ## LDIF-FILE fuer den OUTPUT erfragen
+    if ($namendParameters{"-f"} ne '') {
+        # Datei aus dem Parameter holen
+        $newLdifFile=$namendParameters{"-f"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $newLdifFile=inputText('Please type full path of the new LDIF file, which should be created : ');
+    }
+    
+
+### DATEIEN EINLESEN und ARRAY mit den vorhanden DATEN erstellen ###
+
+
+    outputInfo ($tmpOutputMessage."\nNow the script load and check the files to get informations for the migration process.\n");
+
+
+    # Datei mit den Gruppen einlesen, die NICHT MIGRIERT werden sollen
+    open (notMigrateFileHandle, '<'.$doNotMigrateFile) or outputAndDie("ERROR: Could not open file: $doNotMigrateFile \n"); # Datei oeffnen
+    $numberNotToMigrateGroups=0;                                                # Anzahl der Gruppen als Laufindex fuer das zu fuellende Array
+    while (<notMigrateFileHandle>)                                              # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>0)                                             # betrachte nur Zeilen mit min. 1 Zeichen (und keine leeren Zeilen)
+        {
+            $notToMigratedGroups[$numberNotToMigrateGroups] = $_;                           # Array mit den Werte fuellen
+            $numberNotToMigrateGroups++;
+        }
+    }
+    
+    print '   INFO: Found '.$numberNotToMigrateGroups.' possible group(s) which should NOT migrate.'."\n";
+    close notMigrateFileHandle;
+
+
+    # GROUP-File einlesen (pro Gruppe gibt es hier eine Zeile, die die Werte mit Doppelpunkten trennt)
+    open (groupFileHandle, '<'.$groupFile) or outputAndDie("ERROR: Could not open file: $groupFile \n");            # Datei oeffnen
+    $numberGroup=0;                                                     # Anzahl der Gruppen als Laufindex fuer das zu fuellende Array
+    while (<groupFileHandle>)                                               # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>4)                                             # betrachte nur Zeilen mit min. 5 Zeichen (Trennzeichen und min. je ein Zeichen bei Name und ID)
+        {
+            if (!($_ =~ /[:]/)) { outputAndDie("\nERROR: Could not find a ':'-separator in line: \n$_\n\n"); }  # Fehlermeldung und Beenden, falls Zeile (>4 Zeichen) gefunden, die KEINE Trennzeichen enthaellt
+            
+            # Zerlege die Liste
+            $_.=':dummy';                                               # dieses letzte Element ist ein DUMMY-Eintrag um die oft leeren Spalten am Ende mit Auszuwerten
+            @nameParts = split /[:]/,$_;                                        # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+            $columnsInputList=(scalar(@nameParts)-1);                               # Anzahl Felder dieser Zeile (ohne 'dummy'-Eintrag)
+            
+            my $posValue=0;                                             # temp. Zaehler fuer GUELTIGE Zeichenketten
+            my $migrateThisGroup=1;                                         # temp. Variable zum Pruefen ob die Gruppe migriert werden soll
+            
+            # pruefe ob die Gruppe migriert werden soll
+            for ($i=0;$i<$numberNotToMigrateGroups;$i++)
+            {
+                if ($notToMigratedGroups[$i] eq @nameParts[0])                          # falls der Name der ersten Spalte der Gruppe in $notToMigratedGroups[] gefunden wird
+                {
+                    $migrateThisGroup=0;                                    # Merker setzen, dass dieser Account NICHT migriert werden soll
+                    print '   ... SKIP group '.$notToMigratedGroups[$i]." (will not migrate).\n";       # Info ausgeben an Benutzer
+                }
+            }
+            
+            # FALLS die Gruppe migriert werden soll
+            if ($migrateThisGroup==1)
+            {
+                # speichere alle Felder ab
+                for ($i=0;$i<$columnsInputList;$i++)                                    
+                {
+                    $groupList[$numberGroup][$posValue] = @nameParts[$i];                   # 2D-Array mit den Werte fuellen
+                    $posValue++;                                        # Zaehler fuer naechsten GUELTIGE Wert erhoehen
+                }
+                $numberGroup++;
+            }
+        }
+    }
+
+    
+    print '   INFO: Found '.$numberGroup.' groups for the migration.'."\n";
+    close groupFileHandle;
+
+
+    # GGSHADOW-File einlesen (pro Gruppe gibt es hier eine Zeile, die die Werte mit Doppelpunkten trennt)
+    open (gshadowFileHandle, '<'.$gshadowFile) or outputAndDie("ERROR: Could not open file: $gshadowFile \n");      # Datei oeffnen
+    $numberShadowGroups=0;                                                  # Anzahl der Gruppen als Laufindex fuer das zu fuellende Array
+    while (<gshadowFileHandle>)                                             # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>4)                                             # betrachte nur Zeilen mit min. 5 Zeichen (Trennzeichen und min. je ein Zeichen bei NAME und ID)
+        {
+            if (!($_ =~ /[:]/)) { outputAndDie("\nERROR: Could not find a ':'-separator in line: \n$_\n\n"); }  # Fehlermeldung und Beenden, falls Zeile (>5 Zeichen) gefunden, die KEINE Trennzeichen enthaellt
+
+            # Zerlege die Liste
+            $_.=':dummy';                                               # dieses letzte Element ist ein DUMMY-Eintrag um die oft leeren Spalten am Ende mit Auszuwerten
+            @nameParts = split /[:]/,$_;                                        # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+            $columnsInputList=(scalar(@nameParts)-1);                               # Anzahl Felder dieser Zeile (ohne 'dummy'-Eintrag)
+            
+            my $posValue=0;                                             # temp. Zaehler fuer GUELTIGE Zeichenketten
+            for ($i=0;$i<$columnsInputList;$i++)                                    # speichere alle Felder ab
+            {
+                $gshadowList[$numberShadowGroups][$posValue] = @nameParts[$i];                  # 2D-Array mit den Werte fuellen
+                $posValue++;                                            # Zaehler fuer naechsten GUELTIGE Wert erhoehen
+            }
+            $numberShadowGroups++;
+        }
+    }
+    print '   INFO: Found '.$numberShadowGroups.' valid lines in the GSHADOW file.'."\n";
+    close gshadowFileHandle;
+
+
+### zeige die ersten Zeilen der Eingabe an
+
+
+    ## Ausgabe des Auszugs aus dem GROUP-File
+    if ($namendParameters{"--debug"} eq 'SET') { $maxViewRows = $numberGroup; }                     # im Debug-Modus ALLE Zeilen ausgeben
+    else { $maxViewRows = $numberGroup < 3 ? $numberGroup : 3; }                                # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the GROUP FILE is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the GROUP FILE are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$groupList[$i]}) { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+
+    ## Ausgabe des Auszugs aus dem GSHADOW-File
+    if ($namendParameters{"--debug"} eq 'SET') { $maxViewRows = $numberShadowGroups; }                  # im Debug-Modus ALLE Zeilen ausgeben
+    else { $maxViewRows = $numberShadowGroups < 3 ? $numberShadowGroups : 3; }                      # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the GSHADOW FILE is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the GSHADOW FILE are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$gshadowList[$i]}) { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+    
+    ## Ausgabe ALLER Benutzer, die NICHT migriert werden sollen
+    $tmpOutputMessage.="\n* This group(s) will NOT migrate, because the name(s) is/are written in the file: $doNotMigrateFile\n\n   ";
+    for ($i=0;$i<$numberNotToMigrateGroups;$i++)
+    {
+        $tmpOutputMessage.=$notToMigratedGroups[$i].',';
+    }
+
+
+### erstelle neues Array mit allen Elementen aus Dateien
+
+
+    outputInfo ($tmpOutputMessage."\n\n*** Creating a new array with the combinations of the GROUP and the GSHADOW file. ***\n");
+    
+    @fullGroupList=@groupList;                                              # erzeuge neuen Array-Namen mit Inhalt aus der GROUP hinein
+
+    # suche fuer alle Zeilen in dem GROUP-File
+    for (my $p=0;$p<$numberGroup;$p++)                                          # durchlaufe fuer alle Zeilen in GROUP
+    {       
+        # suche die Zeile im GSHADOW-File
+        for ($s=0;$s<$numberShadowGroups;$s++)                                      # durchlaufe alle Zeilen in GSHADOW
+        {
+            if (($groupList[$p][0]) eq ($gshadowList[$s][0]))                           # falls das erste Element (NAME) in GROUP und GSHADOW gleich sind
+            {
+                foreach my $t (@{$gshadowList[$s]})
+                {
+                    push @fullGroupList[$p],$t;                             # haenge alle Elemente des GSHADOW-Files an
+                }
+            }
+        }
+    }
+
+
+### zeige die ersten Zeilen des neuen Arrays an
+
+
+    ## Ausgabe des Auszugs aus dem kombinierten Array
+    if ($namendParameters{"--debug"} eq 'SET') { $maxViewRows = $numberGroup; }                     # im Debug-Modus ALLE Zeilen ausgeben
+    else { $maxViewRows = $numberGroup < 3 ? $numberGroup : 3; }                                # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the new GROUP + GSHADOW ARRAY is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the new GROUP + GSHADOW ARRAY are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$fullGroupList[$i]}) { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n\n   ";
+    }
+        
+    outputInfo($tmpOutputMessage);
+
+
+### erstelle LDIF-Datei
+
+
+    # erstelle die benoetigte Menge an freien Samba-SIDs - SEMANTIK des AUFRUF: searchFreeIDs($numberNeededIDs,$minID,$maxID,$typOfIDs,\@listUsedIDs,\@listFreeIDs);
+    searchFreeIDs($numberGroup,$firstSambaUID,$lastSambaUID,'Samba-SIDs',\@listUsedSambaSID,\@listFreeSambaUIDs);           # freie ID fuer Samba-GID der Gruppe holen
+
+    if ($namendParameters{"--debug"} eq 'SET') { outputInfo($tmpOutputMessage."\nCreating the LDIF file to create the groups later ..."); }
+
+    # LDIF-Ausgabe-Datei schreiben oeffnen
+    open neueDatei, '>'.$newLdifFile or outputAndDie("ERROR: Could not create the file '".$newLdifFile."'.");
+
+    # den Kopf der LDIF-Datei erzeugen
+    print neueDatei $ldifAddHeader;
+
+    for ($i=0;$i<$numberGroup;$i++)                                             # $numberGroup ist Anzahl aller Nutzer aus GROUP
+    {
+        
+        # Werte lesbarer machen (nur zum Verstaendnis und debugging)
+        $gid1=$fullGroupList[$i][0];                                            # Gruppenname aus GROUPS
+        $gidNumber=$fullGroupList[$i][2];                                       # Gruppen-ID aus GROUPS
+        $listOfGroupMembers1=$fullGroupList[$i][3];                                 # Liste von Gruppenteilnehmern aus GROUPS (die Liste aus GSHADOW wird hier einfach ignoriert)
+        
+        # LDIF Eintraege der aktuellen Gruppe schreiben
+        print neueDatei "\n";                                               # kleiner Abstand fuer die bessere Optik der ldif-Datei, zur Trennung der Gruppen-Eintraege
+        print neueDatei "\n#\n# GROUP: ".$gid1."\n#\n";                                 # Kommentar setzen
+        print neueDatei "dn: cn=".$gid1.",".$ldapGroupBase."\n";                            # die dn-Zeile (eindeutiger LDAP-Pfad zum Objekt)
+        print neueDatei "cn: ".$gid1."\n";                                      # der Name (GID)
+        print neueDatei "description: Posix- und SAMBA-Gruppe $gid1\n";                         # optionale Beschreibung der Gruppe
+        print neueDatei "gidNumber: ".$gidNumber."\n";                                  # die UNIX-GID
+        print neueDatei "objectClass: top\n";                                       # Standardwert fuer alle Gruppen-Accounts
+        print neueDatei "objectClass: posixGroup\n";                                    # Standardwert fuer alle Gruppen-Accounts -> "ist Unix-Gruppe"
+        print neueDatei "objectClass: sambaGroupMapping\n";                             # Standardwert fuer alle Gruppen-Accounts -> "hat Samba-Gruppenmapping"
+        print neueDatei "sambaGroupType: 2\n";                                      # Art der Samba-Gruppe (2 = Domaingruppe; 5 = builtin-Gruppe)
+        
+        # definiere die SID der Gruppe
+        if ($gidNumberOfDomainUsersGroup == $gidNumber)
+        {   
+            print neueDatei "sambaSID: ".$sambaServerSID."-513"."\n";                       # benutze die Samba-SID 513 fuer "Domain Users" als Samba-SID dieser Gruppe
+        }
+        else {
+            print neueDatei "sambaSID: ".$sambaServerSID."-".$listFreeSambaUIDs[$i]."\n";               # neue Samba-SID der Gruppe zuordnen
+        }
+            
+        # Zerlege die Liste der Mitglieder der Gruppe
+        @nameParts = split(/[\,]/,$listOfGroupMembers1);                                # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+        $columnsInputList=scalar(@nameParts);                                       # Anzahl Felder dieser Zeile (ohne 'dummy'-Eintrag)
+
+        # erzeuge fuer jeden Benutzer eine Zeile in der LDIF-Datei
+        for ($j=0;$j<$columnsInputList;$j++)
+        {
+            print neueDatei "memberUID: ".$nameParts[$j]."\n";                          # das Mitglied soll wieder Teil der Gruppe werden
+        }
+
+        #
+        # Unix-PASSWORT-Hash umwandeln und speichern !!! DIESE PASSWORT-ERKENNUNG IST LEIDER NICHT GANZ SAUBER ZUORDENBAR !!!
+        #
+        my $unixGPwHash;
+        if (length($fullGroupList[$i][1])>12) { $unixGPwHash=$fullGroupList[$i][1]; }                   # Passwort-Hash steht in GROUPS selbst, da kein Verweiss auf GSHADOW
+        else { $unixGPwHash=$fullGroupList[$i][5]; }                                    # Passwort-Hash steht in GSHADOW ODER ES EXISTIERT GAR KEIN PASSWORT
+        
+        my $foundPwType='no';
+        
+        # gesperrte Accounts oder fehlende Passoerter in der gshadow
+        if (($unixGPwHash eq '')||($unixGPwHash eq '!')||($unixGPwHash eq '*'))
+        {
+            $foundPwType='yes';                                         # gefunden, aber KEIN Passwort schreiben
+        }
+        
+        # CRYPT erkennen und umwandeln
+        if (($foundPwType eq 'no')&&(length($unixGPwHash)==13))
+        {
+            $tmpOutputMessage.='Note: Save password {CRYPT}'.$unixGPwHash.' for the group '.$gid1.".\n";
+            print neueDatei 'userPassword: {CRYPT}'.$unixGPwHash."\n";                      # das Passwort mit dem Offset '{CRYPT}' schreiben
+            $foundPwType='yes';
+        }
+    
+        # kein bekannter Passwort-Typ
+        if (($foundPwType eq 'no')&&(length($unixGPwHash)>13))
+        {
+            $tmpOutputMessage.='Note: Save password '.$unixGPwHash.' for the group '.$gid1.".\n";
+            print neueDatei 'userPassword: '.$unixGPwHash."\n";                         # das Passwort ohne ein Offset schreiben
+            $foundPwType='yes';
+        }
+        
+        # falls nicht zuordenbar, lasse es einfach weg
+        if ($foundPwType eq 'no')
+        {
+            $tmpOutputMessage.='Warning: Unknown password type '.$unixGPwHash.' for the group '.$gid1." found. I don't migrate this.\n";
+        }
+        
+        # schreibe gidNumber und die Samba-SID der Gruppe (ohne Serverteil) in die Listen fuer zukuenftig gesperrte Namen
+        if ($rememberAndCheckOldIds eq 'y') 
+        {
+            system "echo '".$listFreeSambaUIDs[$i]."' >> ".$fileDeniedSambaUID;                 # Samba-SIDs duerfen nicht doppelt verwendet werden. Es gibt keine Unterscheidung im Einsatz fuer Gruppen und Benutzer.
+            system "echo '".$gidNumber."' >> ".$fileDeniedGidNumbers;                       # GIDs duerfen natuerlich auch nicht doppelt genutzt werden, es seih denn man benoetigt zwei Namen fuer die gleichen Rechte.
+        }
+        
+        # DEBUG-Modus:
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+            $tmpOutputMessage.="Found group: $gid1 \n";
+            $tmpOutputMessage.="   mumber of members: $columnsInputList \n";
+            $tmpOutputMessage.="   members: $listOfGroupMembers1  \n";
+            $tmpOutputMessage.="   GID number: $gidNumber  \n";
+            $tmpOutputMessage.="   sambaSID: ".$sambaServerSID."-".$listFreeSambaUIDs[$i]." \n";
+            $tmpOutputMessage.="   passwordHash: $unixGPwHash  \n";
+            outputInfo($tmpOutputMessage."\n");
+        }
+        
+    }
+
+    # LDIF-Ausgabe-Datei schliessen
+    close neueDatei;
+
+
+### LDIF-Datei fuer die Gruppe senden und NSCD beachten
+
+
+    # NSCD neu einlesen lassen
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+    
+    # Passwort zum Senden des Befehles abfragen
+    $tmpOutputMessage.="Please type the LDAP administartor password to send this ".$numberGroup." new group(s) to the LDAP-Server OR stop that with a wrong password.\n";
+    $commandToRun='ldapadd -x -D '.$ldapAdminBind.' -h '.$ldapServer.' -W -f '.$newLdifFile;
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,$commandToRun,'');
+
+    # NSCD neu einlesen lassen
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+
+
+### beenden ###
+
+    $tmpOutputMessage.="The Group(s) should be converted now.\n";
+    $tmpOutputMessage.="If there was a import problem, check the LDIF file for the last imported group from the upper list.\n";
+    $tmpOutputMessage.="Use 'getent group > new_group_file' to reconvert a new group file from the LDAP and the LOCAL groups.\n\n";
+
+    # Benenden des Scriptes mit Meldung
+    outputInfo($tmpOutputMessage);
+
+    exit 0;

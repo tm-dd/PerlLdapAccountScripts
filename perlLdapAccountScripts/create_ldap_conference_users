@@ -1,0 +1,499 @@
+#!/usr/bin/perl
+#
+# perl based script to create (many) ldap user accounts, based on a (CSV) text file
+# useful to create stable of accounts (for a conference, school class, many students, ...) with separated or the same password
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                 # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                      # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                            # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+    our $windowTitle='CREATE USER ACCOUNTS FOR A CONFERENCE';               # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                   # als Zwischenspeicher fuer Ausgaben
+    $numberUsers=0;                                                         # Anzahl der manuell eingegeben Benutzer (DIES MUSS 0 SEIN, FALLS LOGINLISTE EINGESETZ WERDEN SOLL.)
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }          # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }              # Eingabe-Modus per Dialog
+
+
+### AUSGABE der Doku bzw. --help ###
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'create_ldap_conference_users','--------------------','y','y'));
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+    # lese globale UID, UIDNumbers und SambaSIDs ein (nach @listUsedUid @listUsedUidNumber @listUsedSambaSID)
+    readSystemIDs();
+
+
+### Konferenznamen abfragen
+
+    ## NACHNAME
+    if ($namendParameters{"-n"} ne '') {
+        # Name der Konferenz erfragen
+        $nameOfConference=testSimpleStrings($namendParameters{"-n"},'Name of the conference: ');
+    }
+    else {
+        # manuelle Eingabe des Namens der Konferenz
+        $nameOfConference=inputText('Name of the conference: ');                             # Eingabe des Namens der Konferenz
+        $nameOfConference=testSimpleStrings($nameOfConference,'Name of the conference: ');   # pruefe und ersetzte ggf. den Namen der Konferenz
+    }
+
+
+### WERTE ZUM ACCOUNT ABFRAGEN UND ERSTELLEN ###
+
+    ## FILE WITH THE USER ACCOUNTS
+    if ($namendParameters{"-f"} ne '') {
+        # Datei mit den Benutzeraccounts aus Parameter laden
+        $fileNameAccounts=$namendParameters{"-f"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei mit den Benutzeraccounts
+        $fileNameAccounts=selectFilename("Please choose the file with the conference users, now.","Please choose the file with the conference users.",'/root/','y');
+    }
+
+
+### TEXTDATEI EINLESEN
+
+    ## Lese Loginliste ein und zerlege diese in ihre Bestandteile
+    outputInfo ($tmpOutputMessage."\nLoading and checking the file of new users ...\n");
+
+    open (inputliste, '<'.$fileNameAccounts) or outputAndDie("ERROR: Could not open file: $fileNameAccounts \n");       # Loginliste laden
+    while (<inputliste>)                                                                     # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                                            # Zeilenumbruch entfernen
+        if ((length($_))>2)                                                                  # betrachte nur Zeilen mit min. 3 Zeichen
+        {
+            ## Fehlermeldung und Beenden, falls Zeile (>2 Zeichen) gefunden, die KEINE Leerzeichen enthaellt (Leerzeichen dienen als Trennzeichen)
+            if (!($_ =~ /[ ]+/)) { outputAndDie("\nERROR: Could not find a space separator in the line: \n$_\n\n"); }
+
+            # Zerlege die Liste
+            @nameParts = split /[ ]+/,$_;                                                    # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+            $columnsInputList=scalar(@nameParts);                                            # Anzahl Felder dieser Zeile
+            $posValue=0;                                                                     # Zaehler fuer GUELTIGE Zeichenketten
+            for ($i=0;$i<$columnsInputList;$i++)                                             # speichere alle Felder ab
+            {
+                if (!((@nameParts[$i] =~ m/[ ]+/)||(@nameParts[$i] eq '')))                  # nur GUELTIGE Zeichenketten zulassen (die Account-tauglich sind)
+                {                                                                            # -> damit keine '' oder ' ' zu Account-Werten werden
+                    $inputList[$numberUsers][$posValue] = @nameParts[$i];                    # 2D-Array mit den Werte fuellen
+                    $posValue++;                                                             # Zaehler fuer naechsten GUELTIGE Wert erhoehen
+                }
+            }
+            @numberFieldsInputList[$numberUsers]=$posValue;                                  # diese Array enthaellt die Anzahl von Feldern dieser Zeile
+            $numberUsers++;
+        }
+    }
+    close inputliste;
+
+
+### zeige die ersten Zeilen an
+
+    $maxViewRows = $numberUsers < 3 ? $numberUsers : 3;                                      # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\nThe first line is:\n\n   "; }
+    else { $tmpOutputMessage.="\nThe first $maxViewRows lines are:\n\n   "; }
+
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$inputList[$i]})  { $tmpOutputMessage.="$j\t\t"; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+
+### waehle die Spalte fuer das Login
+
+    if ($namendParameters{"-c"} ne '')
+    {
+        # hole die Spalte mit dem Loginnamen aus dem Parameter
+        $colUid=$namendParameters{"-c"};
+    }
+    else
+    {
+        # frage die Spalte mit dem Login Namen ab
+        $colUid=inputText($tmpOutputMessage."\nWhich COLUM has the LOGIN NAME ?  The rest of eache line will merge to the full name. Use '0' for the LAST colum or define a different number: ",'0');
+
+        if (!(($colUid<=$columnsInputList)&&($colUid>=0)))
+        {
+            $colUid=0; outputInfo("!!! INPUT ERROR. I will use the last column of each line.\n");
+        }
+    }
+        
+    #
+    # INFO: LDAP verlangt, das die Felder fuer Vor- und Nachname ausgefuellt werden, deshalb koennen diese nicht leer sein.
+    #       (Der Loginname ist natuerlich auch Pfilcht.) Der vollstaendige Name des Benutzers wird spaeter aus Vor- und Nachname gebildet.
+    #
+    
+
+### Passwort-Eingabe und TEST (pruefen ob das eingegebene Passwort gueltig ist)
+
+    my $useAutoGeneratedPasswords='maybe';
+
+    # Skript-Paramater fuer die Passwort-Generierung gesetzt ?
+    if ($namendParameters{"-r"} eq 'SET')
+    {
+        # falls der Skript-Parameter '-c' genutzt ist, erstelle benutzerspezifische Passwoerter
+        $useAutoGeneratedPasswords='y';
+    }
+
+    # Skript-Paramater fuer die Passwort-Eingabe gesetzt ?
+    if ($namendParameters{"-p"} ne '')
+    {
+        # falls der Skript-Parameter '-p' genutzt ist, benutze dieses Passwort
+        $useAutoGeneratedPasswords='n';
+
+        # die Passwort-Hashes erstellen lassen
+        ($sambaLMPassword,$sambaNTPassword,$userPassword)=createPasswordHashes($namendParameters{"-p"});
+        
+        # speichere das Klartext-Passwort fuer die Handzettel
+        $cleartextPassword = $namendParameters{"-p"};   
+        
+        # Ausgabe der Hashes zur Kontrolle
+        $tmpOutputMessage.="\nThis are the password hashes (for debugging):\n\n";           # NUR TEST-AUSGABE !!!
+        $tmpOutputMessage.="SAMBA-LM-PWD: $sambaLMPassword\n";                              # NUR TEST-AUSGABE !!!
+        $tmpOutputMessage.="SAMBA-NT-PWD: $sambaNTPassword\n";                              # NUR TEST-AUSGABE !!!
+        outputInfo($tmpOutputMessage."UNIX-PWD: $userPassword\n");                          # NUR TEST-AUSGABE !!!
+    }
+    
+    # keine Angabe zum Passwort-Wunsch aus den Parametern, frage also nach
+    if (($namendParameters{"-r"} ne 'SET') && ($namendParameters{"-p"} eq ''))
+    {
+        # frage ob automatische Passwort Generierung erwuenscht ist
+        $useAutoGeneratedPasswords = yesNoQuestion("Should every user get a own password",'y','n','y');
+    
+        # manuelle Passwort-Eingabe fuer alle Benutzer (induviduelle Passwoerter werden dagegen auf Wunsch bei der LDIF-Generierung erstellt)
+        if ($useAutoGeneratedPasswords eq 'n')
+        {
+            ## Passwort-Eingabe mit TEST ob das eingegebene Passwort gueltig ist
+            $passwordText1='Please type the new password for the new user: ';
+            $passwordText2='Please type the new password again: ';
+            ($sambaLMPassword,$sambaNTPassword,$userPassword,$cleartextPassword)=inputPassword($passwordText1,$passwordText2,$minLengthPassword,$maxLengthPassword,$passwordQuality,'');
+        
+            # ueberschreiben des unsicheren LM-Passwortes (fuer SMB-Zugriffe bis Windows ME), wenn dies gewuenscht ist
+            if ($disableSambaLMPassword eq 'y') { $sambaLMPassword='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'; }
+            
+            # Ausgabe der Hashes zur Kontrolle
+            $tmpOutputMessage.="\nThis are the password hashes (for debugging):\n\n";       # NUR TEST-AUSGABE !!!
+            $tmpOutputMessage.="SAMBA-LM-PWD: $sambaLMPassword\n";                          # NUR TEST-AUSGABE !!!
+            $tmpOutputMessage.="SAMBA-NT-PWD: $sambaNTPassword\n";                          # NUR TEST-AUSGABE !!!
+            outputInfo($tmpOutputMessage."UNIX-PWD: $userPassword\n");                      # NUR TEST-AUSGABE !!!
+        }
+    }
+
+
+### melden, dass es nun laenger daueren kann
+
+    outputInfo($tmpOutputMessage."\n\nPress wait for building and checking the logins, user names, free uids, ... .\n");
+
+
+### Erstelle Listen fuer freie nutzbare IDs
+    
+    # Listen erzeugen
+    my @listFreeUIDNubers;
+    my @listFreeSambaUIDs;
+
+    # SEMANTIK des AUFRUF: searchFreeIDs($numberNeededIDs,$minID,$maxID,$typOfIDs,\@listUsedIDs,\@listFreeIDs);
+    searchFreeIDs($numberUsers,$firstUidNumber,$lastUidNumber,'Unix-UIDs',\@listUsedUidNumber,\@listFreeUIDNubers);     # freieIDs fuer Unix-UID
+    searchFreeIDs($numberUsers,$firstSambaUID,$lastSambaUID,'Samba-SIDs',\@listUsedSambaSID,\@listFreeSambaUIDs);       # freieIDs fuer Samba
+    
+    
+### erstelle ARRAY mit neuen Benutzerdatensaetzen
+
+    $loginNumber=0;                                                     # dies ist der Laufzaehler des Ausgabe-Arrays, $i der des Eingabe-Arrays
+    my @oldLoginsOfSkippedUsers;										# eine Liste von Loginnamen, die spaeter doch nicht erstellt werden sollen, aber moeglicherweise in die LDAP-Gruppe kommen
+
+    for ($i=0;$i<$numberUsers;$i++)
+    {
+        # alte Werte loeschen
+        $givenName='-'; $sn='-'; $cn='-'; $uid='-';                     # leere Eintraege ignoriert LDAP
+
+        # hole das Login, pruefe es und passe es ggf. an
+        $uid=$inputList[$i][$colUid-1];
+        $planedUid=$uid;
+        $uid=testUid($uid);
+
+        # schreibe das Login in BEIDE Listen
+        push @listUsedUid,$uid;                                         # in die Liste benutzter Login schreiben
+        $newLogins[$loginNumber][1]=$uid;                               # in die Liste neuer Login schreiben
+    
+        # neue uidNumber und Samba-SID schreiben
+        $newLogins[$loginNumber][2]=@listFreeUIDNubers[$i];             # die Unix-UID-Nummer
+        $newLogins[$loginNumber][3]=@listFreeSambaUIDs[$i];             # der Benutzer-SambaSID-Anteil
+        
+        # setze Default- Vor- und Nachname, denn nur der volle Benutzername kann eindeutig gebildet werden, der Rest muss aber auch einen Wert haben 
+        $newLogins[$loginNumber][4]=$defaultGivenName;                  # den (default) Vornamen speichern
+        $newLogins[$loginNumber][5]=$defaultSn;                         # den (default) Nachnamen speichern
+
+        # ganzer Name ("full name") fuer die Anzeige in Programmen bilden und testen
+        $cn='';                                                         # erstmal einen leeren 'full name' bilden
+        for ($j=1;$j<=@numberFieldsInputList[$i];$j++)                  # durchlaufe alle Spalten
+        {
+            if (! (($colUid==0)&&($j==@numberFieldsInputList[$i])) )    # WENN KEIN SONDERFALL (Login wurde als letzte Spalte gewaehlt und man ist gerade am Ende)
+            {
+                if ($colUid != $j)                                      # wenn diese Spalte nicht dem Login dient
+                {
+                    $cn.=$inputList[$i][$j-1].' ';                      # dann ergaenze den 'full name' um diese Spalte
+                }
+            }
+        }
+        $cn =~ s/\s+$//g;   $cn =~ s/^\s+//g;                           # evtl. vorh. Leerzeichen am Anfang und Ende entfernen
+        $cn=testSimpleStrings($cn,'full name');                         # prueffe und ersetzte ggf. den vollen Namen (Vor- ... und Nachname) des Benutzers
+        $newLogins[$loginNumber][6]=$cn;                                # der volle Name des Benutzers in das Array
+
+        # erstelle die E-Mail-Adresse
+        $newLogins[$loginNumber][7] = $uid.'@'.$emailDomain;
+
+        # Default-Werte fuer die ownCloud-Quota und die Anzahl paraleller WLAN-Logins angeben
+        $newLogins[$loginNumber][8]=$defaultQuotaCloudSpace;                        # Quota fuer den ownCloud-Speicherplatz (falls ueberhaupt benutzbar fuer Konferenzgaeste)
+        $newLogins[$loginNumber][9]=$defaultNumberOfParallelWirelessLogins;         # Anzahl erlaubter paralleler WLAN-Geraete pro Account (falls Wert interpretiert wird)
+        
+        # PASSWORT-Erstellung
+        if ($useAutoGeneratedPasswords eq 'n')                                      # FALL: alle Benutzer nutzen das selbe Passwort
+        {
+            # speichere die Passwoert-Hashes des Benutzers welches nach der Eingabe (des Standard-Passwortes fuer alle Benutzer) erstellt wurde
+            $newLogins[$loginNumber][10] = $userPassword;
+            $newLogins[$loginNumber][11] = $sambaNTPassword;
+            $newLogins[$loginNumber][12] = $sambaLMPassword;
+        }
+        else                                                                        # FALL: jeder Benutzer bekommt ein eigenes, zufalliges Passwort
+        {                           
+            $cleartextPassword=createPassword($conferencePwLen,$conferencePwLen);   # erstelle neues Zufalls-Passwort mit $conferencePwLen Anzahl von Zeichen
+            
+            (my $sambaLmPwH,my $sambaNtPwH,my $unixPwH)=createPasswordHashes($cleartextPassword);   # neue Passwort-Hashes erstellen
+            
+            # erstelle normale Passwort Hashes
+            $newLogins[$loginNumber][10] = $unixPwH;                                # speichere Hash des Unix-Passwortes
+            $newLogins[$loginNumber][11] = $sambaNtPwH;                             # speichere Hash des Samba-LM-Passwortes
+            
+            # erstelle veralteten LM-Passwort Hash
+            if ($disableSambaLMPassword eq 'y') {
+                $newLogins[$loginNumber][12]='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';    # deaktiviere unsicheren LM-Passwortes (fuer SMB-Zugriffe bis Windows ME), wenn dies gewuenscht ist
+            }
+            else {
+                $newLogins[$loginNumber][12] = $sambaLmPwH;                         # erstelle und speichere Hash des Samba-LM-Passwortes auf Wunsch trotzdem
+            }
+        }
+        
+        # speichere eine Beschreibung
+        $newLogins[$loginNumber][13] = 'login '.$uid.' from conference '.$nameOfConference;
+
+        # setze Heimatverzeichnis und Login-Shell
+        $newLogins[$loginNumber][14]=$stdHomeDir.$uid;
+        $newLogins[$loginNumber][15]=$stdLoginShell;
+
+        # speichere das Klartext-Passwort fuer die Handzettel
+        $newLogins[$loginNumber][99] = $cleartextPassword;                 
+        
+        # erhoehe den Zaehler (falls das login nicht $noLoginName lautet) der Logins um eins
+        if ($uid ne $noLoginName) { $loginNumber++; }                               # falls das login so wie $noLoginName lautet, wird Array-Wert ueberschrieben oder durch zu geringen Zaehler spaeter ignoriert
+        
+        # speichere alten LoginNamen von Nutzern, die ueber setzen auf $noLoginName nicht erstellt werden sollen
+        if ($uid eq $noLoginName) { push @oldLoginsOfSkippedUsers,$planedUid; outputInfo("Ignore the login $uid but put it in the group, later.\n");} 
+    }
+    
+    # $numberUsers = $loginNumber;                                                  # da durch "weglassen" (per $noLoginName) von Benutzern die Anzahl geringer sein kann
+
+
+### zeige an was spaeter die Grundlage fuer Vor-, Nachname und Login wird
+
+    $tmpOutputMessage.="\nThis will use the following names for the first $maxViewRows Account(s):\n\n";
+
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        $tmpOutputMessage.='   login name             : '.$newLogins[$i][1]."\n";                   # login name
+        $tmpOutputMessage.='   uid number             : '.$newLogins[$i][2]."\n";                   # unix id of the user
+        $tmpOutputMessage.='   samba user part        : '.$newLogins[$i][3]."\n";                   # last user part of the Samba SID
+        $tmpOutputMessage.='   first name             : '.$newLogins[$i][4]."\n";                   # first name of the user
+        $tmpOutputMessage.='   surname                : '.$newLogins[$i][5]."\n";                   # surname of the user
+        $tmpOutputMessage.='   full name              : '.$newLogins[$i][6]."\n";                   # full name of the user
+        $tmpOutputMessage.='   email address          : '.$newLogins[$i][7]."\n";                   # email adress of the user
+        $tmpOutputMessage.='   cloud quota            : '.$newLogins[$i][8]."\n";                   # quota of the disk space of cloud storage (ownCloud)
+        $tmpOutputMessage.='   parallel wlan logins   : '.$newLogins[$i][9]."\n";                   # numbers of paralle wireless devices (eduroam, ...)
+        $tmpOutputMessage.='   unix password hash     : '.$newLogins[$i][10]."\n";                  # the unix password hash
+        $tmpOutputMessage.='   Samba LM password hash : '.$newLogins[$i][11]."\n";                  # the samba NT password hash
+        $tmpOutputMessage.='   Samba NT password hash : '.$newLogins[$i][12]."\n";                  # the samba Lan Manager password hash
+        if ($namendParameters{"--debug"} eq 'SET')
+        {
+            $tmpOutputMessage.='   cleartext password     : '.$newLogins[$i][99]."\n";              # the random password in cleartext (to creating the welcome paper with the random password)
+        }
+        
+        $tmpOutputMessage.="\n";                                                   # optische Trennzeile (zwischen den Accounts)
+    }
+
+    outputInfo($tmpOutputMessage."\n");
+
+
+### LDIF-Datei fuer Benutzer erstellen und senden
+
+    # erstelle die LDIF-DATEI
+    createLdifFileForNewUsers($ldifTempFilename,$numberUsers);
+
+    # im debug-Modus Ausgabe der LDIF-Datei
+    if ($namendParameters{"--debug"} eq 'SET') { outputFile($ldifTempFilename); }
+
+    # Passwort zum Senden des Befehles abfragen
+    $tmpOutputMessage.="Please type the LDAP administartor password to create the ".$numberUsers." new conference accounts OR stop that with a wrong password.\n";
+    $commandToRun='ldapadd -x -D '.$ldapAdminBind.' -h '.$ldapServer.' -W -f '.$ldifTempFilename;
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,$commandToRun,'');
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n");
+
+
+### testen ob LDAP-Gruppe schon exisiert
+
+    my $ldapSearchBase='cn='.$nameOfConference.','.$ldapGroupBase;               # LDAP-Knoten der durchsucht bzw. gesucht werden soll
+    my $ldapSearchValue='gidNumber';                                             # Attribut, dass am LDAP-Knoten gesucht werden soll
+    (my $errorMessage,my $numbersOfVaulues,my @ldapFoundArray)=getSimpleLdapValue($ldapSearchBase,$ldapSearchValue);    # starte die Suchanfrage
+
+    # Ausgabe der Werte im Debug-Modus
+    if ($namendParameters{"--debug"} eq 'SET')
+    {   
+        outputInfo("DEBUG: LDAP ERROR: $errorMessage\n");                        # Ausgabe der LDAP-Fehler
+        outputInfo("DEBUG: NUMBERS OF FOUND: $numbersOfVaulues\n");              # Ausgabe der Anzahl der LDAP-Objekte
+
+        foreach my $i (@ldapFoundArray) { $tmpOutputMessage.=$i."\n"; }                                   # setze die gefundenen LDAP-Objekte zusammen
+        outputInfo("DEBUG: FOUND IN LDAP FOR THE ATTRIBUT '".$ldapSearchValue."': ".$tmpOutputMessage);   # Ausgabe aller gefundenen LDAP-Objekte 
+    }
+    
+
+### falls Gruppe nicht existiert Gruppe ueber exterenes Skript anlegen
+
+    # falls $numbersOfVaulues groesser als 0 wurde die Gruppe gefunden
+    if ($numbersOfVaulues eq '0')
+    {
+        outputInfo("creating new ldap group '$nameOfConference' for the conference users ...\n");
+        
+        # ANLEGEN der (LDAP-) Gruppe (falls diese bisher nicht existierte) mittels Skript
+        system ($pathOfScripts.'/create_ldap_group -n '.$nameOfConference);                     
+    }
+    else
+    {
+        outputInfo("Ldap group '$nameOfConference' still exists. Put the new users to this group.\n");
+    }
+
+
+### LDIF-Datei zum Hinzufuegen der Benutzer in die Gruppe erstellen und senden
+
+    my @arrayOfUsers=();                                   # temp. Array mit allen Loginnamen erstellen (fuer Uebergabe als Referenz an die dann folgende Funktion)
+
+    for ($i=0;$i<$numberUsers;$i++) {                      # Login in das Array aller Benutzer schreiben
+        push @arrayOfUsers,$newLogins[$i][1];                                       
+		if ($namendParameters{"--debug"} eq 'SET') { $tmpOutputMessage.="Add user $newLogins[$i][1] to group.\n"; }
+    }
+
+	if ( $storeNoLoginNamesToConferenceGroupAlso eq 'y').  # falls gewuenscht schreibe in das Array auch die Benutzer, die jetzt nicht angelegt werden sollen
+	{
+		foreach $i (@oldLoginsOfSkippedUsers) {
+			push @arrayOfUsers,$i;
+			$numberUsers++;
+			if ($namendParameters{"--debug"} eq 'SET') { $tmpOutputMessage.="Add extra user $i to group.\n"; }
+		}
+	}
+
+	if ($namendParameters{"--debug"} eq 'SET') { outputInfo("DEBUG:\n\n".$tmpOutputMessage."\n"); }
+
+    my @arrayOfGroups=('cn='.$nameOfConference.','.$ldapGroupBase);   # weil die Funktion die Referenz eines Arrays mit allen Gruppen-DNs haben will, dies hier erstellen
+
+    # hier wird die LDIF-Datei erstellt
+    createLdifFileToAddOrRemoveUsersfromGroups($ldifTempFilename,$numberUsers,1,\@arrayOfUsers,\@arrayOfGroups,'add');
+
+    # im debug-Modus Ausgabe der LDIF-Datei
+    if ($namendParameters{"--debug"} eq 'SET') { outputFile($ldifTempFilename); }
+
+    # LDAP-Daten hinzufuegen (um die Accounts anzulegen) mit einem LDAP-Admin-Passwort
+    $tmpOutputMessage.="Please type the LDAP administartor password to put the ".$numberUsers." new accounts to the group '".$nameOfConference."' OR stop that with a wrong password.\n";
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,"ldapadd -x -D $ldapAdminBind -h $ldapServer -W -f $ldifTempFilename",'');
+
+    # loesche die temp. LDIF-Datei wieder
+    unlink $ldifTempFilename or outputAndDie("ERROR: Could not delete the temporary LDIF file: '$ldifTempFilename' \n");
+
+
+### Heimatverzeichnisse der Benutzer anlegen
+
+    createUserFiles($numberUsers);
+
+
+### Handzettel erstellen
+    
+    my $offsetfileHandouts=$pathOfScripts.'tmp/handouts_'.$nameOfConference;   # Dateiname OHNE Suffix fuer die Latex-, DVI-, PS- und PDF-Dateien
+    my $dirOfHandoutFiles=$pathOfScripts.'tmp/';
+    
+    # alte Handout-Dateien loeschen
+    system "rm -f $offsetfileHandouts.*";
+    
+    # Kopf der Datei schreiben (Definitionen schreiben und Dokument eroeffnen)
+    system "cat ".$fileHandoutTemplateStart." >> ".$offsetfileHandouts.".tex";
+    
+    # fuer jeden Benutzer einen Letter schreiben
+    for ($i=0;$i<$numberUsers;$i++)
+    {
+        open (inputFile, '<'.$fileHandoutTemplateUser) or outputAndDie("FEHLER: Could not read the file '".$fileHandoutTemplateUser."'.\n");
+        open (outFile, '>>'.$offsetfileHandouts.".tex") or outputAndDie("FEHLER: Could not write the file: '".$offsetfileHandouts.".tex'\n");
+        while (<inputFile>)
+        {
+            $_ =~ s/FULLNAME/$newLogins[$i][6]/;
+            $_ =~ s/LOGIN/$newLogins[$i][1]/;
+            $_ =~ s/PASSWORD/$newLogins[$i][99]/;
+            print outFile $_;
+        }
+        close inputFile;
+        close outFile;
+    }
+
+    # Ende der Datei schreiben (das Dokument sauber beenden)
+    system "cat ".$fileHandoutTemplateEnd." >> ".$offsetfileHandouts.".tex";
+
+    # Uebersetze die LATEX-DATEI
+    $tmpOutputMessage.='Compiling the handouts for the conference users. This can take a while. If the process takes longer, please PRESS ENTER.';
+    outputInfo($tmpOutputMessage);
+    system("set -x; cd ".$dirOfHandoutFiles."; latex ".$offsetfileHandouts.".tex");
+    system("set -x; cd ".$dirOfHandoutFiles."; dvips ".$offsetfileHandouts.".dvi");
+    system("set -x; cd ".$dirOfHandoutFiles."; ps2pdf ".$offsetfileHandouts.".ps");
+    system("set -x; cp ".$offsetfileHandouts.".pdf ".$offsetfileHandouts."_".$datestring.".pdf");
+    outputInfo("INFO: If there was no error the new PDF file '".$offsetfileHandouts."_".$datestring.".pdf' should be created now.\n      It contains the account informations for the conference users.\n      Please send the file to the visitors program ...\n");
+
+
+### merke die eingesetzten IDs in den Sperrlisten ###
+
+    # falls Sperrlisten eingesetzt werden sollen, merke jetz die neuen IDs
+    if ($rememberAndCheckOldIds eq 'y') 
+    {
+        for ($i=0;$i<$numberUsers;$i++)
+        {
+            system "echo '".$newLogins[$i][1]."' >> ".$deniedLoginNames;       # den Login-Namen des Benutzers merken
+            system "echo '".$newLogins[$i][2]."' >> ".$fileDeniedUidNumbers;   # die UNIX-UID des Benutzers merken
+            system "echo '".$newLogins[$i][3]."' >> ".$fileDeniedSambaUID;     # die Samba-SID des Benutzers merken
+        }
+    }
+
+
+### beenden ###
+
+    # Benenden des Scriptes mit Meldung
+    outputInfo($tmpOutputMessage."The Account(s) should be created now.\n\n");
+
+    exit 0;

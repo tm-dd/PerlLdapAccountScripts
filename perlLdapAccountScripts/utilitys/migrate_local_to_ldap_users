@@ -1,0 +1,683 @@
+#!/usr/bin/perl
+#
+# a perl based script to migrate accounts from /etc/passwd and /etc/shadow to OpenLDAP (without passwords)
+#
+# perlbasiertes Skript zum Migrieren der Accounts aus /etc/passwd (mit shadow) ins LDAP
+#
+# Copyright (c) 2022 tm-dd (Thomas Mueller)
+#
+# This code is free software. You can use, redistribute and/or
+# modify it under the terms of the GNU General Public Licence
+# version 2, as published by the Free Software Foundation.
+# This program is distributed without any warranty.
+# See the GNU General Public Licence for more details.
+#
+
+# die zentrale Konfigurationsdatei und zentrale Funktions-Datei einbinden
+require '/usr/local/perlLdapAccountScripts/configs/config';                                           # die zentrale Konfigrationsdatei einbinden
+require $functionFile;                                                          # die zentrale Funktions-Datei einbinden
+
+# Ergaenzung fuer LDAP-Suche einbinden
+use Net::LDAP;                                                              # unter Debian-Etch Pakete: "libconvert-asn1-perl" und "libnet-ldap-perl" unter SLES10 "perl-ldap" und "perl-Convert-ASN1"
+
+
+### variables and defaults ###
+
+
+    our $windowTitle='MIGRATE USER ACCOUNTS TO LDAP';                                       # der aktuelle Fenstertitel, falls ein Menue-bassiertes Skript im Einsatz ist
+    $tmpOutputMessage="";                                                       # als Zwischenspeicher fuer Ausgaben
+
+    if ($namendParameters{"-i"} eq 'c') { $usedGui='perl-print'; }                                  # Eingabe-Modus per Kommandozeile
+    if ($namendParameters{"-i"} eq 'd') { $usedGui='dialog'; }                                  # Eingabe-Modus per Dialog
+
+    our @fullUserList=();                                                       # dieses Array hat spaeter die Kombinationen aller Werte des PASSWD- und SHADOW-FILES
+    
+        #######################################
+        ### AUFBAU DES ARRAYS @fullUserList ###
+        #
+        # array[zeile][0]:  Login (aus PASSWD)
+        # array[zeile][1]:  'x' als Kennzeichen, dass Passwort in SHADOW steht
+        # array[zeile][2]:  Nummer der Benutzer-ID (UID number)
+        # array[zeile][3]:  Nummer der Standard-Gruppe (GID)
+        # array[zeile][4]:  vollstaendiger Benutzername
+        # array[zeile][5]:  Heimatverzeichnis
+        # array[zeile][6]:  SHELL
+        # array[zeile][7]:  Login (aus SHADOW)
+        # array[zeile][8]:  Passwort-Hash
+        # array[zeile][9]:  Tag der letzten Passwort-Aenderung
+        # array[zeile][10]: Wartezeit bis zur naechsten moeglichen Passwort-Aenderung
+        # array[zeile][11]: Maximale Tage der Gueltigkeit des Passwortes (oft 99999)
+        # array[zeile][12]: Anzahl Tage ab wann der Benutzer eine Warnung zur noetigen Passwort-Aenderung bekommt (oft 7)
+        # array[zeile][13]: Anzahl Tage bis zur Deaktivierung des Accounts nach Ablauf der Passwort-Gueltigkeit (oft leer)
+        # array[zeile][14]: Anzahl der Tage nach dem 1.1.1970 bis zur Deaktivierung des Accounts (oft leer)
+        # array[zeile][15]: Reserviert (leer)
+        # array[zeile][16]: Login (aus SMBPASSWD)
+        # array[zeile][17]: UID fuer das Mapping des Windows- zum Unix- Account
+        # array[zeile][18]: Samba-LM-Password
+        # array[zeile][19]: Samba-NT-Password
+        # array[zeile][20]: Samba-Flags (Parameter U...User,W...Workstation-Trust-Account,N...No_Password,D...DEAKTIVIERT) (aus SMBPASSWD)
+        # array[zeile][21]: Unix-Timestamp der letzten Passwortaenderung
+        # array[zeile][22]: Login (aus dem Samba-Users-File {anhand 'pdbedit -L -v'})
+        # array[zeile][23]: Samba-Account-Flags (aus dem Samba-Users-File)
+        # array[zeile][24]: Samba-SID des Benutzers
+        # array[zeile][25]: Samba-SID der Standard-Gruppe
+        #
+        #######################################
+
+    our $activeUsers='';                                                        # in diesem String sollen alle aktiven Benutzer (das sind hier diese, welche EIN gueltigen Passworthash haben) aneinander gehaengt werden
+    
+
+### AUSGABE der Doku bzw. --help ###
+
+
+    if ($namendParameters{"--help"} eq 'SET')
+    {
+        # Ausgabe der Hilfefunktion fuer den Benutzer
+        outputInfo(grepTextFile($optionsFile,'migrate_local_to_ldap_users','--------------------','y','y'));
+        exit;
+    }
+
+
+### INITIALE AUFGABEN ###
+
+
+    # Start nur als root erlauben (Der Start dazu kann z.B. mittels "/bin/su -l -c '/path/skript parameter'" erzwungen werden.) ?
+    if ($<!='0') { outputInfo($tmpOutputMessage."This script must run as user root.\n"); exit; }
+
+    outputInfo("!!! WARNING: Are you check your account lists for this migration and delete system accounts, remove invalid characters ... ? !!!\n");
+
+    # lese globale UID, UIDNumbers und SambaSIDs aus dem LDAP und der lokalen /etc/passwd ein (nach @listUsedUid @listUsedUidNumber @listUsedSambaSID)
+    # ACHTUNG: Bei der Migration werden die vorhandenen UIDs, GIDs und SIDs aus den zu migrierenden Dateien verwendet. Die Arrays verhindern dabei jedoch, dass z.B. "neue SIDs" nicht bereits vorher verwendet wurden.
+    readSystemIDs();
+
+
+### DATEINAMEN ABFRAGEN ODER AUS PARAMETER HOLEN ###
+
+
+    ## PASSWD FILE
+    if ($namendParameters{"-up"} ne '') {
+        # Datei aus dem Parameter holen
+        $passwdFile=$namendParameters{"-up"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $passwdFile=selectFilename("\nPlease choose the passwd file (/etc/passwd) for importing.","Choose file",'/etc/','n');
+    }
+
+    
+    ## SHADOW FILE
+    if ($namendParameters{"-us"} ne '') {
+        # Datei aus dem Parameter holen
+        $shadowFile=$namendParameters{"-us"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $shadowFile=selectFilename("\nPlease choose the shadow file (/etc/shadow) for importing.","Choose file",'/etc/','n');
+    }
+
+    
+    ## SMBPASSWD FILE
+    if ($namendParameters{"-sp"} ne '') {
+        # Datei aus dem Parameter holen
+        $smbpasswdFile=$namendParameters{"-sp"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $smbpasswdFile=selectFilename("\nPlease choose the smbpasswd file (to create with 'pdbedit -L -w') for importing.","Choose file",'/etc/','n');
+    }
+
+    
+    ## SAMBA-USERS-FILE
+    if ($namendParameters{"-su"} ne '') {
+        # Datei aus dem Parameter holen
+        $smbUsersFile=$namendParameters{"-su"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $smbUsersFile=selectFilename("\nPlease choose the samba users info file (to create with 'pdbedit -L -v') for importing. Use a empty file, if you doesn't used samba before.","Choose file",'/root/','n');
+    }
+
+
+    ## Textdatei mit den Loginnamen, die NICHT migriert werden sollen (z.B. Systemaccounts wie: root,ftp,bin,nologin,...) 
+    if ($namendParameters{"-n"} ne '') {
+        # Datei aus dem Parameter holen
+        $doNotMigrateFile=$namendParameters{"-n"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $doNotMigrateFile=selectFilename("\n".'Please choose the plain text file with the list of users, which should exclude from the migration process : ',"Choose file",'/root/','n');
+    }
+    
+    ## Gruppe oder Liste mit Komma getrennter Gruppennamen (z.B. users1,users2,users3 ) in welche alle aktuellen Account gesteckt werden sollen
+    if ($namendParameters{"-g"} ne '') {
+        # Datei aus dem Parameter holen
+        $listOfGroupsWithActiveUsers=$namendParameters{"-g"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $listOfGroupsWithActiveUsers=inputText("\n".'Please type a new (comma seperated list of) LDAP group(s) name(s) for all active users OR type "-" for none: ');
+    }   
+
+    ## LDIF-FILE fuer den OUTPUT erfragen
+    if ($namendParameters{"-f"} ne '') {
+        # Datei aus dem Parameter holen
+        $newLdifFile=$namendParameters{"-f"};
+    }
+    else {
+        # manuelle Eingabe/Auswahl der Datei
+        $newLdifFile=inputText("\n".'Please type the name and path of the new LDIF file, which should be created : ');
+    }
+    
+
+### PASSWD, SHADOW UND SMBPASSWD EINLESEN und ARRAY mit den vorhanden DATEN DES BENUTZERS erstellen ###
+
+
+    ## Lese Loginliste ein und zerlege diese in ihre Bestandteile
+    outputInfo ($tmpOutputMessage."\nNow the script load and check the passwd, shadow and some other files to get informations for the migration process.\n");
+
+
+    # Datei mit den Logins einlesen, die NICHT migriert werden sollen
+    open (notMigrateFileHandle, '<'.$doNotMigrateFile) or outputAndDie("ERROR: Could not open file: $doNotMigrateFile \n"); # Datei oeffnen
+    $numberNotToMigrateUsers=0;                                             # Anzahl der Benutzer als Laufindex fuer das zu fuellende Array
+    while (<notMigrateFileHandle>)                                              # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>0)                                             # betrachte nur Zeilen mit min. 1 Zeichen (und keine leeren Zeilen)
+        {
+            $notToMigratedUsers[$numberNotToMigrateUsers] = $_;                         # Array mit den Werte fuellen
+            $numberNotToMigrateUsers++;
+        }
+    }
+    
+    print '   INFO: Found '.$numberNotToMigrateUsers.' possible account(s) which should NOT migrate.'."\n";
+    close notMigrateFileHandle;
+
+
+    # PASSWD-File einlesen (pro Benutzer gibt es hier eine Zeile, die die Werte mit Doppelpunkten trennt)
+    open (passwdFileHandle, '<'.$passwdFile) or outputAndDie("ERROR: Could not open file: $passwdFile \n");         # Datei oeffnen
+    $numberPasswdUsers=0;                                                   # Anzahl der Benutzer als Laufindex fuer das zu fuellende Array
+    while (<passwdFileHandle>)                                              # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>8)                                             # betrachte nur Zeilen mit min. 8 Zeichen (Trennzeichen und min. je ein Zeichen bei Login und ID)
+        {
+            if (!($_ =~ /[:]/)) { outputAndDie("\nERROR: Could not find a ':'-separator in line: \n$_\n\n"); }  # Fehlermeldung und Beenden, falls Zeile (>8 Zeichen) gefunden, die KEINE Trennzeichen enthaellt
+            
+            # Zerlege die Liste
+            @nameParts = split /[:]/,$_;                                        # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+            $columnsInputList=scalar(@nameParts);                                   # Anzahl Felder dieser Zeile
+            my $posValue=0;                                             # temp. Zaehler fuer GUELTIGE Zeichenketten
+            my $migrateThisAccount=1;                                       # temp. Variable zum Pruefen ob der Account migriert werden soll
+            
+            # pruefe ob der Account migriert werden soll
+            for ($i=0;$i<$numberNotToMigrateUsers;$i++)
+            {
+                if ($notToMigratedUsers[$i] eq $nameParts[0])                           # falls der Name der ersten Spalte der PASSWD in $notToMigratedUsers[] gefunden wird
+                {
+                    $migrateThisAccount=0;                                  # Merker setzen, dass dieser Account NICHT migriert werden soll
+                    print '   ... SKIP account '.$notToMigratedUsers[$i]." (will not migrate).\n";  # Info ausgeben an Benutzer
+                }
+            }
+            
+            # FALLS der Account migriert werden soll
+            if ($migrateThisAccount==1)
+            {
+                # speichere alle Felder ab
+                for ($i=0;$i<$columnsInputList;$i++)                                    
+                {
+                    if ($nameParts[$i] eq '') { $nameParts[$i] = '-'; }                 # leere Eintraege mit '-' fuellen
+                    $passwdList[$numberPasswdUsers][$posValue] = $nameParts[$i];                # 2D-Array mit den Werte fuellen
+                    $posValue++;                                        # Zaehler fuer naechsten GUELTIGE Wert erhoehen
+                }
+                $numberPasswdUsers++;
+            }
+        }
+    }
+
+    
+    print '   INFO: Found '.$numberPasswdUsers.' accounts for the migration in the PASSWD file.'."\n";
+    close passwdFileHandle;
+
+    # SHADOW-File einlesen (pro Benutzer gibt es hier eine Zeile, die die Werte mit Doppelpunkten trennt)
+    open (shadowFileHandle, '<'.$shadowFile) or outputAndDie("ERROR: Could not open file: $shadowFile \n");         # Datei oeffnen
+    $numberShadowUsers=0;                                                   # Anzahl der Benutzer als Laufindex fuer das zu fuellende Array
+    while (<shadowFileHandle>)                                              # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>8)                                             # betrachte nur Zeilen mit min. 8 Zeichen (Trennzeichen und min. je ein Zeichen bei Login und ID)
+        {
+            if (!($_ =~ /[:]/)) { outputAndDie("\nERROR: Could not find a ':'-separator in line: \n$_\n\n"); }  # Fehlermeldung und Beenden, falls Zeile (>8 Zeichen) gefunden, die KEINE Trennzeichen enthaellt
+            $_.=':dummy';                                               # dieses letzte Element ist ein DUMMY-Eintrag um die oft leeren Spalten am Ende mit Auszuwerten
+            # Zerlege die Liste
+            @nameParts = split /[:]/,$_;                                        # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+            $columnsInputList=(scalar(@nameParts)-1);                               # Anzahl Felder dieser Zeile (ohne 'dummy'-Eintrag)
+            my $posValue=0;                                             # temp. Zaehler fuer GUELTIGE Zeichenketten
+            for ($i=0;$i<$columnsInputList;$i++)                                    # speichere alle Felder ab
+            {
+                # if (@nameParts[$i] eq '') { @nameParts[$i] = '-'; }                       # leere Eintraege mit '-' fuellen
+                $shadowList[$numberShadowUsers][$posValue] = $nameParts[$i];                    # 2D-Array mit den Werte fuellen
+                $posValue++;                                            # Zaehler fuer naechsten GUELTIGE Wert erhoehen
+            }
+            $numberShadowUsers++;
+        }
+    }
+    print '   INFO: Found '.$numberShadowUsers.' valid lines in the SHADOW file.'."\n";
+    close shadowFileHandle;
+
+    
+    # SMBPASSWD-File einlesen (pro Benutzer gibt es hier eine Zeile, die die Werte mit Doppelpunkten trennt)
+    open (smbpasswdFileHandle, '<'.$smbpasswdFile) or outputAndDie("ERROR: Could not open file: $smbpasswdFile \n");    # Datei oeffnen
+    $numberSmbpasswdUsers=0;                                                # Anzahl der Benutzer als Laufindex fuer das zu fuellende Array
+    while (<smbpasswdFileHandle>)                                               # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>8)                                             # betrachte nur Zeilen mit min. 8 Zeichen (Trennzeichen und min. je ein Zeichen bei Login und ID)
+        {
+            # Zerlege die Liste
+            @nameParts = split /[:]/,$_;                                        # Trennzeichen fuer Benutzerdaten (Felder) in Zeile
+            $columnsInputList=scalar(@nameParts);                                   # Anzahl Felder dieser Zeile
+            my $posValue=0;                                             # temp. Zaehler fuer GUELTIGE Zeichenketten
+            for ($i=0;$i<$columnsInputList;$i++)                                    # speichere alle Felder ab
+            {
+                if ($nameParts[$i] eq '') { $nameParts[$i] = '-'; }                     # leere Eintraege mit '-' fuellen
+                $smbpasswdList[$numberSmbpasswdUsers][$posValue] = $nameParts[$i];              # 2D-Array mit den Werte fuellen
+                $posValue++;                                            # Zaehler fuer naechsten GUELTIGE Wert erhoehen
+            }
+            $numberSmbpasswdUsers++;
+        }
+    }
+    print '   INFO: Found '.$numberSmbpasswdUsers.' valid lines in the SMBPASSWD file.'."\n";
+    close smbpasswdFileHandle;
+
+
+    # SAMBA-USERS-File einlesen (pro Benutzer gibt es hier einen Block mit ca. 24 Zeilen, der mit Strichen beginnt)
+    open ($smbUsersFileHandle, '<'.$smbUsersFile) or outputAndDie("ERROR: Could not open file: $smbUsersFile \n");      # Datei oeffnen
+    $numberSmbUsersFileUsers=-1;                                                # Anzahl der Benutzer als Laufindex fuer das zu fuellende Array
+    while (<$smbUsersFileHandle>)                                               # durchlaufe alle Zeilen der Liste
+    {
+        chomp $_;                                                   # Zeilenumbruch entfernen
+        if ((length($_))>5)                                             # betrachte nur Zeilen mit min. X Zeichen
+        {
+            if ($_ =~ '^---------------')                                       # neuer Datensatz eines Benutzers startet nun
+            {
+                $numberSmbUsersFileUsers++;                                 # da neuer Datensatz, schreibe in sein neues Array
+                $posValue=0;
+            }
+            
+            if ($_ =~ '^Unix username:')
+            {
+                @lineParts = split /[:]/,$_;                                    # links vom ':' steht der Name, rechts davon der Wert
+                $lineParts[1] =~ s/^\s+|\s+$//;                                 # Leerzeichen des Wertes entfernen
+                $smbUsersFileList[$numberSmbUsersFileUsers][$posValue] = $lineParts[1];             # schreibe den Wert in Array
+                $posValue++;
+            }
+            
+            if ($_ =~ '^User SID:')
+            {
+                @lineParts = split /[:]/,$_;                                    # links vom ':' steht der Name, rechts davon der Wert
+                $lineParts[1] =~ s/^\s+|\s+$//;                                 # Leerzeichen des Wertes entfernen
+                my $startLastSIDPart = rindex ($lineParts[1],'-');                      # Position des letzen Striches (danach kommt der Benutzerteil der SID)
+                my $sambaUserSIDPart = substr ($lineParts[1],($startLastSIDPart)+1);                # den Benutzerteil der SambaSID speichern (der Rest ist serverspeziefisch)
+                $smbUsersFileList[$numberSmbUsersFileUsers][$posValue] = $sambaUserSIDPart;         # schreibe den Wert in Array
+                push @listUsedSambaSID,$sambaUserSIDPart;                           # merke die SID in der Liste verwendeter SIDs
+                $posValue++;
+            }
+            
+            if ($_ =~ '^Primary Group SID:')
+            {
+                @lineParts = split /[:]/,$_;                                    # links vom ':' steht der Name, rechts davon der Wert
+                $lineParts[1] =~ s/^\s+|\s+$//;                                 # Leerzeichen des Wertes entfernen
+                $smbUsersFileList[$numberSmbUsersFileUsers][$posValue] = $lineParts[1];             # schreibe den Wert in Array
+                $posValue++;
+            }
+            
+            if ($_ =~ '^Account Flags:')
+            {
+                @lineParts = split /[:]/,$_;                                    # links vom ':' steht der Name, rechts davon der Wert
+                $lineParts[1] =~ s/^\s+|\s+$//;                                 # Leerzeichen des Wertes entfernen
+                $smbUsersFileList[$numberSmbUsersFileUsers][$posValue] = $lineParts[1];             # schreibe den Wert in Array
+                $posValue++;
+            }
+        }
+    }
+    print '   INFO: Found '.$numberSmbUsersFileUsers.' valid lines in the Samba users file.'."\n";
+    close $smbUsersFileHandle;
+    
+
+### zeige die ersten Zeilen der Eingabe an
+
+
+    ## Ausgabe des Auszugs aus dem PASSWD-File
+    $maxViewRows = $numberPasswdUsers < 3 ? $numberPasswdUsers : 3;                             # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the PASSWD FILE is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the PASSWD FILE are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$passwdList[$i]}) { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+
+    ## Ausgabe des Auszugs aus dem SHADOW-File
+    $maxViewRows = $numberShadowUsers < 3 ? $numberShadowUsers : 3;                             # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the SHADOW FILE is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the SHADOW FILE are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$shadowList[$i]}) { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+    
+    ## Ausgabe des Auszugs aus dem SMBPASSWD-File
+    $maxViewRows = $numberSmbpasswdUsers < 3 ? $numberSmbpasswdUsers : 3;                           # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the SMBPASSWD FILE is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the SMBPASSWD FILE are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$smbpasswdList[$i]})  { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+
+    ## Ausgabe des Auszugs aus dem SMBUSERS-File
+    $maxViewRows = $numberSmbUsersFileUsers < 3 ? $numberSmbUsersFileUsers : 3;                     # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the samba users info file is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the samba users info file are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$smbUsersFileList[$i]})   { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n   ";
+    }
+
+    
+    ## Ausgabe ALLER Benutzer, die NICHT migriert werden sollen
+    $tmpOutputMessage.="\n* This account(s) (if exist(s)) will NOT migrate, because the name(s) is/are written in the file: $doNotMigrateFile\n\n   ";
+    for ($i=0;$i<$numberNotToMigrateUsers;$i++)
+    {
+        $tmpOutputMessage.=$notToMigratedUsers[$i].',';
+    }
+
+
+### erstelle neues Array mit allen Elementen aus dem passwd und shadow file
+
+    outputInfo ($tmpOutputMessage."\n\n*** Creating a new array with the combinations of the PASSWD and the other files. ***\n");
+    
+    @fullUserList=@passwdList;                                              # erzeuge neuen Array-Namen mit Inhalt aus der PASSWD hinein
+
+    
+    # suche fuer alle Zeilen in dem PASSWD-File
+    for (my $p=0;$p<$numberPasswdUsers;$p++)                                        # durchlaufe fuer alle Zeilen in PASSWD
+    {       
+        # suche die Zeile im SHADOW-File
+        for ($s=0;$s<$numberShadowUsers;$s++)                                       # durchlaufe alle Zeilen in SHADOW
+        {
+            if (($passwdList[$p][0]) eq ($shadowList[$s][0]))                           # falls das erste Element (LOGIN) in PASSWD und SHADOW gleich sind
+            {
+                foreach my $t (@{$shadowList[$s]})
+                {
+                    push $fullUserList[$p],$t;                              # haenge alle Elemente des SHADOW-Files an
+                }
+            }
+        }
+        # suche die Zeile im SMBPASSWD-File
+        for ($s=0;$s<$numberSmbpasswdUsers;$s++)                                    # durchlaufe alle Zeilen in SMBPASSWD
+        {
+            if (($passwdList[$p][0]) eq ($smbpasswdList[$s][0]))                            # falls das erste Element (LOGIN) in PASSWD und SMBPASSWD gleich sind
+            {
+                foreach my $t (@{$smbpasswdList[$s]})
+                {
+                    push $fullUserList[$p],$t;                              # haenge alle Elemente des SMBPASSWD-Files an
+                }
+            }
+        }
+        # suche die Zeile im SAMBA-USERS-File-File
+        for ($s=0;$s<$numberSmbUsersFileUsers;$s++)                                 # durchlaufe alle Zeilen in SMBUSERSFILE
+        {
+            if (($passwdList[$p][0]) eq ($smbUsersFileList[$s][0]))                         # falls das erste Element (LOGIN) in PASSWD und SMBUSERSFILE gleich sind
+            {
+                foreach my $t (@{$smbUsersFileList[$s]})
+                {
+                    push $fullUserList[$p],$t;                              # haenge alle Elemente des SMB-Files an
+                }
+            }
+        }
+    }
+
+
+### zeige die ersten Zeilen des neuen Arrays an
+
+
+    ## Ausgabe des Auszugs aus dem kombinierten Array
+    $maxViewRows = $numberPasswdUsers < 3 ? $numberPasswdUsers : 3;                             # Anzahl Zeilen die angezeigt werden sollen (wie MAX-Funktion)
+    if ($maxViewRows==1) {  $tmpOutputMessage.="\n* The first line in the new PASSWD + SHADOW + SMBPASSWD + SMBUSERS ARRAY is:\n\n   "; }
+    else { $tmpOutputMessage.="\n* The first $maxViewRows lines in the new PASSWD + SHADOW + SMBPASSWD + SMBUSERS ARRAY are:\n\n   "; }
+    for ($i=0;$i<$maxViewRows;$i++)
+    {
+        foreach $j (@{$fullUserList[$i]}) { $tmpOutputMessage.="$j  #  "; }
+        $tmpOutputMessage.="\n\n   ";
+    }
+        
+    outputInfo($tmpOutputMessage);
+
+
+### erstelle ARRAY mit neuen Benutzerdatensaetzen
+
+    # Erstelle neue, freie Samba-SID (noetig fuer alle Accounts ohne eine Angabe der SID des Accounts in der Datei $smbUsersFile)
+    my @listFreeSambaUIDs;
+    searchFreeIDs($numberPasswdUsers,$firstSambaUID,$lastSambaUID,'Samba-SIDs',\@listUsedSambaSID,\@listFreeSambaUIDs); # freie SIDs fuer Samba-Benutzer-Accounts
+
+    $loginNumber=0;                                                     # $loginNumber hat spaeter Anzahl gesuchter Nutzer
+
+    for ($i=0;$i<$numberPasswdUsers;$i++)                                           # $numberPasswdUsers ist Anzahl aller Nutzer aus PASSWD
+    {
+        # alte Werte loeschen
+        
+            $givenName='-'; $sn='-'; $cn='-'; $uid='-';                             # leere Eintraege wuerde LDAP sonst ignorieren
+            $uid=$fullUserList[$i][0];                                      # login
+            
+        # schreibe das Login in BEIDE Listen
+        
+            push @listUsedUid,$uid;                                         # in die Liste benutzter Login schreiben (fuer spaeter)
+            $newLogins[$loginNumber][1]=$uid;                                   # in die Liste neuer Login schreiben
+    
+        # uidNumber und gidNumber
+        
+            $newLogins[$loginNumber][2]=$fullUserList[$i][2];                           # die Unix-UID-Nummer
+            $newLogins[$loginNumber][25]=$fullUserList[$i][3];                          # die Unix-GID-Nummer der Standard-Gruppe
+            
+        # setze Default- Vor- und Nachname, denn nur der volle Benutzername kann eindeutig gebildet werden, der Rest muss aber auch einen Wert haben 
+        
+            $newLogins[$loginNumber][4]=$defaultGivenName;                              # den (default) Vornamen speichern
+            $newLogins[$loginNumber][5]=$defaultSn;                                 # den (default) Nachnamen speichern
+
+        # ganzer Name ("full name") fuer die Anzeige in Programmen bilden und testen
+        
+            # $cn =~ s/\s+$//g;   $cn =~ s/^\s+//g;                                 # evtl. vorh. Leerzeichen am Anfang und Ende entfernen
+            $newLogins[$loginNumber][6]=$fullUserList[$i][4];                           # der volle Name des Benutzers in das Array setzen
+
+        # erstelle die E-Mail-Adresse
+
+            $newLogins[$loginNumber][7] = $uid.'@'.$emailDomain;
+
+        # Default-Werte fuer die ownCloud-Quota und die Anzahl paraleller WLAN-Logins angeben
+
+            $newLogins[$loginNumber][8]=$defaultQuotaCloudSpace;                            # Quota fuer den ownCloud-Speicherplatz (falls ueberhaupt benutzbar fuer Konferenzgaeste)
+            $newLogins[$loginNumber][9]=$defaultNumberOfParallelWirelessLogins;                 # Anzahl erlaubter paralleler WLAN-Geraete pro Account (falls Wert interpretiert wird)
+                
+        
+        # Unix-PASSWORT-Hash umwandeln und speichern !!! DIESE PASSWORT-ERKENNUNG IST LEIDER NICHT GANZ SAUBER ZUORDENBAR !!!
+        
+            my $unixPwHash=$fullUserList[$i][8];
+            my $foundPwType='no';
+            
+            # gesperrte Accounts oder fehlende Passoerter in der shadow
+            if (($unixPwHash eq 'Nologin******')||($unixPwHash eq '')||($unixPwHash eq '!')||($unixPwHash eq '*'))
+            {
+                $newLogins[$loginNumber][10]=$unixDisabledPasswordHash; $foundPwType='yes';
+            }
+            
+            # CRYPT erkennen und umwandeln
+            if (($foundPwType eq 'no')&&(length($unixPwHash)==13))
+            {
+                $newLogins[$loginNumber][10]='{CRYPT}'.$unixPwHash; $foundPwType='yes';
+                $activeUsers.=$uid.',';                                     # ein Komma nach jeden Account (das letzte Komma wird spaeter geloescht)
+            }
+        
+            # kein bekannter Passwort-Typ
+            if ($foundPwType eq 'no')
+            {
+                print 'WARNING: Unknown password type for the account '.$uid." found. I store the current string as password.\n";
+                $newLogins[$loginNumber][10] = $unixPwHash;
+                $activeUsers.=$uid.',';                                     # ein Komma nach jeden Account (das letzte Komma wird spaeter geloescht)
+            }
+    
+        # speichere den NT-Passwort-Hash, falls fueher vorhanden und das UNIX-Passwort nicht gesperrt war (oft wurde vergessen das Samba-PW zu speeren, wenn das Unix-PW gesperrt wurde)
+        
+            if (($fullUserList[$i][19] eq '')||($newLogins[$loginNumber][10] eq $unixDisabledPasswordHash))
+            {
+                $newLogins[$loginNumber][11]='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+            }
+            else { $newLogins[$loginNumber][11] = $fullUserList[$i][19]; }
+            
+        # schreibe veralteten LM-Passwort Hash (fuer SMB-Zugriffe bis Windows ME) oder deaktiviere ihn (je nach config)
+        
+            if (($disableSambaLMPassword eq 'y')||($newLogins[$loginNumber][10] eq $unixDisabledPasswordHash))
+            {
+                $newLogins[$loginNumber][12]='XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+            }
+            else { $newLogins[$loginNumber][12] = $fullUserList[$i][18]; }
+
+        # displayName - angezeigter Name unter ownCloud
+        
+            $newLogins[$loginNumber][13]=$fullUserList[$i][4];      # wie der volle Name des Instituts
+
+        # Home und SHELL
+
+            $newLogins[$loginNumber][14]=$fullUserList[$i][5];      # Heimatverzeichnis aus PASSWD
+            $newLogins[$loginNumber][15]=$fullUserList[$i][6];      # Shell aus PASSWD
+        
+        # Samba-Passwort-Attribute mit den Defaults aus der config fuellen
+        
+            $newLogins[$loginNumber][16]=$sambaPwdCanChange;        # sambaPwdCanChange aus Defaultwert der config
+            $newLogins[$loginNumber][17]=$sambaPwdLastSet;          # sambaPwdLastSet aus Defaultwert der config
+            $newLogins[$loginNumber][18]=$sambaPwdMustChange;       # sambaPwdMustChange aus Defaultwert der config
+            
+        # SHADOW-Attribute mit den Defaults aus der config fuellen
+        
+            $newLogins[$loginNumber][20]=$fullUserList[$i][9];      # shadowLastChange
+            $newLogins[$loginNumber][22]=$fullUserList[$i][10];     # shadowMin
+            $newLogins[$loginNumber][21]=$fullUserList[$i][11];     # shadowMax
+            $newLogins[$loginNumber][23]=$fullUserList[$i][12];     # shadowWarning
+            if ($fullUserList[$i][13] eq '') {              # falls der Wert leer war
+                $fullUserList[$i][13]=$shadowInactive;          # den Default benutzen
+            }
+            $newLogins[$loginNumber][19]=$fullUserList[$i][13];     # shadowInactive
+            
+        # Samba-Account-Flags sowie SAMBA-SIDs fuer den Benutzer und dessen Standard-Gruppe setzen
+
+            # Samba-Account-Flag wie: W fuer workstation ... account, U fuer user account, ...
+            if ($fullUserList[$i][23] ne '') { $newLogins[$loginNumber][24]=$fullUserList[$i][23]; }            # den Wert aus der Datei $smbUsersFile holen
+            else { $newLogins[$loginNumber][24]='[UX         ]'; }                              # Standardwert (X -> "Konto laeuft nie ab"; U -> "user account")
+        
+            # die SID des Benutzers
+            if ($fullUserList[$i][24] ne '') { $newLogins[$loginNumber][3]=$sambaServerSID.'-'.$fullUserList[$i][24]; } # den Wert aus der Datei $smbUsersFile holen
+            else { $newLogins[$loginNumber][3]=$sambaServerSID.'-'.$listFreeSambaUIDs[$i]; }                # neue, freie SID einsetzen
+        
+            # die SID der Standard-Gruppe des Benutzers
+            if ($fullUserList[$i][25] ne '') { $newLogins[$loginNumber][26]=$fullUserList[$i][25]; }            # den Wert aus der Datei $smbUsersFile holen
+            else { $newLogins[$loginNumber][26]=$sambaServerSID.'-'.$sambaPrimaryGroupSIDOffset; }              # die SID der Standard-Gruppe schreiben
+    
+        # erhoehe den Zaehler der Logins um eins und bearbeite falls moeglich den naechsten Benutzer
+        $loginNumber++;
+    }
+    
+    $numberUsers = $loginNumber;                                                    # da durch "weglassen" (per $noLoginName) von Benutzern die Anzahl geringer sein kann
+
+    chop($activeUsers);                                                     # loesche das Komma nach dem letzten Login in der Liste
+
+
+### LDIF-Datei fuer Benutzer erstellen und senden
+
+    # erstelle die LDIF-DATEI
+    createLdifFileForUsersWithIndividualSettings($newLdifFile,$numberUsers);
+    
+    # NSCD neu einlesen lassen
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+    
+    # Passwort zum Senden des Befehles abfragen
+    $tmpOutputMessage.="Please type the LDAP administartor password to send this ".$numberUsers." new accounts to the LDAP-Server OR stop that with a wrong password.\n";
+    $commandToRun='ldapadd -x -D '.$ldapAdminBind.' -h '.$ldapServer.' -W -f '.$newLdifFile;
+    runLdapAdminShellCommandWithPassword($tmpOutputMessage,$commandToRun,'');
+    
+    # NSCD neu einlesen lassen
+    if (-x '/usr/sbin/nscd') { system "/usr/sbin/nscd -i group; /usr/sbin/nscd -i passwd"; }
+
+
+### merke die eingesetzten IDs in den Sperrlisten
+
+
+    # falls Sperrlisten eingesetzt werden sollen, merke jetzt die neuen IDs
+    if ($rememberAndCheckOldIds eq 'y') 
+    {
+        
+        outputInfo($tmpOutputMessage."Please wait to write the lists of used logins, UIDs and Samba SIDs.");
+        
+        for ($i=0;$i<$numberUsers;$i++)
+        {
+            system "echo '".$newLogins[$i][1]."' >> ".$deniedLoginNames;                            # den Login-Namen des Benutzers speichern
+            system "echo '".$newLogins[$i][2]."' >> ".$fileDeniedUidNumbers;                        # die UNIX-UID des Benutzers speichern
+            my $startLastSIDPart = rindex ($newLogins[$i][3],'-');                              # Position des letzen Striches (danach kommt der Benutzerteil der SID)
+            my $sambaUserSIDPart = substr ($newLogins[$i][3],($startLastSIDPart)+1);                    # den Benutzerteil der SambaSID speichern
+            system "echo '".$sambaUserSIDPart."' >> ".$fileDeniedSambaUID;                          # die Samba-SID (ohne Server-Teil) des Benutzers speichern
+        }
+    }
+
+
+### erstelle die Liste von Gruppen
+        
+    # Gruppenliste in Array aufsplitten
+    @groupList = split (/[,]+/,$listOfGroupsWithActiveUsers);                                   # Trennzeichen fuer Gruppennamen (Felder) in Zeile
+    $numberOfGroups=scalar(@groupList);                                             # Anzahl der Gruppen
+    $groupCounter=0;
+
+    # rufe fuer alle Gruppen die Skripte zum Anlegen der Gruppe und zum Hinzufuegen der Nutzer in die Gruppe aus
+    foreach my $groupName (@groupList)
+    {
+        # falls der Gruppenname nicht bewusst ungueltig eingegeben wurde 
+        if (($groupName ne '-')&&($groupName ne '')&&($groupName ne 'SET'))
+        {
+            $tmpOutputMessage.="All users with a valid unix password will be add to the group '$groupName' (group $groupCounter of $numberOfGroups) in the next step.\n";
+            outputInfo($tmpOutputMessage);
+
+            # falls die Option "--dctg" NICHT gesetzt wurde, erstelle die neue LDAP-Gruppen 
+            if ($namendParameters{"--dctg"} ne 'SET')
+            {
+                $commandToRun=$pathOfScripts.'create_ldap_group -n '.$groupName;                    # hier entsteht das Kommando zum Anlegen der Gruppe ueber eine temp. LDIF-Datei
+                $tmpOutputMessage.="Now the the following command will be started:\n\n   ";
+                outputInfo($tmpOutputMessage.$commandToRun."\n");
+                system ($commandToRun);
+            }
+            
+            # die aktiven Benutzeraccounts zur Gruppe hinzufuegen
+            $commandToRun=$pathOfScripts.'add_ldap_users_to_groups -g '.$groupName.' -u '.$activeUsers;         # hier entsteht eine Kommandozeile der Art ".../add_ldap_user_to_group -g gruppe -u login1,login2,login3"
+            $tmpOutputMessage.="Now the the following command will be started:\n\n   ";
+            outputInfo($tmpOutputMessage.$commandToRun."\n");
+            system ($commandToRun);
+
+            $groupCounter++;
+        }
+    }
+
+
+### beenden
+
+    $tmpOutputMessage.="The Account(s) should be converted now.\n";
+    $tmpOutputMessage.="If there was a import problem, check the LDIF file for the last imported user from the upper list.\n";
+    $tmpOutputMessage.="Sometimes a problem come from a (locked or incorrect configured) system account. See also: --help\n\n";
+    $tmpOutputMessage.="Read $optionsFile to see how to reconvert the LDAP accounts to passwd and shadow to check the migration process.\n\n";
+
+    # Benenden des Scriptes mit Meldung
+    outputInfo($tmpOutputMessage);
+    
+exit 0;
